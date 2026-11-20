@@ -1,0 +1,37 @@
+name: BODtoJSON 2.6.0 parity
+
+# The studio previews run an in-browser port of BODtoJSON. This checks it gives
+# the same results as the Python package from PyPI, and that the ION scripts the
+# studio generates run under BODtoJSON 2.6.0 with the output the studio shows.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install BODtoJSON 2.6.0 and test tools
+        run: |
+          python -m pip install "BODtoJSON==2.6.0"
+          npm install --no-save @xmldom/xmldom@0.9.12 playwright-core@1.65.1
+      - name: Engine parity (templates, conditions, repeats, errors, json_to_bod)
+        run: |
+          python tests/parity/gen_cases.py 5000 7 "$RUNNER_TEMP/cases.json"
+          node tests/parity/run_parity.js index.html "$RUNNER_TEMP/cases.json"
+      - name: Studio end to end (generated ION scripts vs previews)
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: |
+          node tests/e2e/e2e.js index.html "$RUNNER_TEMP/e2e.json"
+          python tests/e2e/verify.py "$RUNNER_TEMP/e2e.json"

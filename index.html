@@ -1125,8 +1125,12 @@
                 <div class="split-view">
                     <div class="editor-col">
                         <div class="editor-col-head">
-                            <h3>ION Python · BODtoJSON</h3>
+                            <h3>ION Python · BODtoJSON 2.6.0</h3>
                             <div style="display:flex; gap:0.4rem; align-items:center;">
+                                <select id="ionMissingMode" class="btn-compact" title="Value for BOD fields that are not in the document (bod_to_json missing=)" onchange="setIonMissingMode(this.value)" style="cursor:pointer; width:auto; flex:0 0 auto;">
+                                    <option value="null" selected>Missing → null</option>
+                                    <option value="empty">Missing → ""</option>
+                                </select>
                                 <button type="button" class="btn-compact btn-compact-history" onclick="openMappingHistoryModal()">History</button>
                                 <button type="button" class="btn-compact btn-compact-exec" onclick="simulatePython()">▶ Execute</button>
                             </div>
@@ -1147,7 +1151,7 @@
                 <div class="mapper-header">
                     <div style="display:flex; flex-direction:column; gap:0.2rem;">
                         <span style="font-size: 0.84rem; font-weight: 600; color: var(--text-main);">Inbound API JSON ➔ Infor OAGIS BOD Studio</span>
-                        <span style="font-size: 0.73rem; color: var(--text-muted);">Map incoming JSON fields into BOD leaf nodes with <span style="color:#60a5fa; font-weight:600;">+ Merge</span> &amp; <span style="color:#fbbf24; font-weight:600;">+ IF / CASE</span> rules, then test XML injection.</span>
+                        <span style="font-size: 0.73rem; color: var(--text-muted);">Map incoming JSON fields into BOD leaf nodes with <span style="color:#60a5fa; font-weight:600;">+ Merge</span> &amp; <span style="color:#fbbf24; font-weight:600;">+ IF / CASE</span> rules; the agent script builds the BOD with BODtoJSON <span style="font-family:var(--font-mono);">json_to_bod</span>.</span>
                     </div>
                     <div style="display:flex; align-items:center; gap:0.65rem; flex-wrap:wrap;">
                         <button type="button" class="btn-tree-toggle" id="btnToggleBodTreeIn" onclick="toggleBodTreePanel('inbound')">View XML BOD Tree</button>
@@ -1203,12 +1207,12 @@
                     <div class="inbound-pane" id="inboundPaneCode">
                         <div class="inbound-code-grid">
                             <div class="editor-col">
-                                <h3>Inbound ION Agent (`inbound.py`)</h3>
+                                <h3>Inbound ION Agent (`inbound.py`) · json_to_bod</h3>
                                 <textarea id="inboundPythonInput" spellcheck="false"></textarea>
                             </div>
                             <div class="editor-col">
                                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border-subtle); padding-bottom:0.5rem;">
-                                    <h3 style="margin-bottom:0; border-bottom:none; padding-bottom:0; color: var(--accent-inbound);">Simulated OAGIS XML Injection</h3>
+                                    <h3 style="margin-bottom:0; border-bottom:none; padding-bottom:0; color: var(--accent-inbound);">Simulated json_to_bod Output (sample JSON)</h3>
                                     <button type="button" class="btn-mini" onclick="copyInboundXmlOutput()">Copy XML</button>
                                 </div>
                                 <textarea id="inboundPythonOutput" readonly style="color: #c4b5fd; border-color: rgba(139, 92, 246, 0.35); background: rgba(139, 92, 246, 0.06);"></textarea>
@@ -3141,301 +3145,1546 @@ ${indent.slice(4)}`;
             return out;
         }
 
-        function bodPathToFlatKey(path) {
-            let clean = path.replace(/[{}]/g, '').trim();
-            // Strip root BOD element and DataArea prefix (e.g. "SyncSupplierPartyMaster.DataArea.SupplierPartyMaster.Status.Code" -> "SupplierPartyMaster.Status.Code")
-            clean = clean.replace(/^[^.]+\.DataArea\./, '').replace(/^DataArea\./, '');
-            // ApplicationArea paths in BODtoJSON are flattened from ApplicationArea onwards
-            clean = clean.replace(/^[^.]+\.(ApplicationArea\.)/, '$1');
-            // Header Sync attributes/fields (e.g. "Sync.AccountingEntityID" -> "AccountingEntityID")
-            clean = clean.replace(/^Sync\./, '');
-            // Strip Noun root wrapper when followed by child path (e.g. "SupplierPartyMaster.CurrencyCode" -> "CurrencyCode", "SupplierPartyMaster.PartyIDs.DisplayID" -> "PartyIDs_DisplayID")
-            const nounMatch = clean.match(/^([A-Za-z0-9_]+)\.(.+)$/);
-            if (nounMatch && nounMatch[1] !== 'ApplicationArea') {
-                clean = nounMatch[2];
-            }
-            return clean.replace(/\./g, '_').replace(/@/g, '').trim();
-        }
+        /*BODTOJSON_JS_START*/
+        // In-browser port of BODtoJSON 2.6.0 (PyPI) used for the previews:
+        // to_records (flattening), Mapper / bod_to_data / bod_to_json (output
+        // templates), TransformRules (2.5 flat rules) and json_to_bod.
+        // Same rules, same results as the Python package; no eval.
+        const BODtoJSONjs = (function () {
+            'use strict';
+            const VERSION = '2.6.0';
+            class BODTransformError extends Error { constructor(m) { super(m); this.name = 'BODTransformError'; } }
+            class BODParseError extends Error { constructor(m) { super(m); this.name = 'BODParseError'; } }
+            class BODStructureError extends Error { constructor(m) { super(m); this.name = 'BODStructureError'; } }
 
-        function formatPythonValueExpr(rawVal, direction) {
-            const trimmed = String(rawVal ?? '').trim();
-            if (trimmed.toLowerCase() === 'true') return 'True';
-            if (trimmed.toLowerCase() === 'false') return 'False';
-            if (!trimmed.includes('{')) {
-                return `"${trimmed.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-            }
-            if (direction === 'outbound') {
-                const formatted = trimmed.replace(/\{([^}]+)\}/g, (_, p) => `{_pick(r, ${getBodKeyCandidates(p).replace(/"/g, "'")})}`);
-                return `f"${formatted.replace(/"/g, '\\"')}"`;
-            } else {
-                const formatted = trimmed.replace(/\{([^}]+)\}/g, (_, p) => `{data.get('${p.trim()}', '')}`);
-                return `f"${formatted.replace(/"/g, '\\"')}"`;
-            }
-        }
+            // ---------- Python-compatible helpers ----------
+            const PY_WS = '\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+            const STRIP_RE = new RegExp('^[' + PY_WS + ']+|[' + PY_WS + ']+$', 'g');
+            const strip = s => String(s).replace(STRIP_RE, '');
+            const has = (o, k) => o !== null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+            const isMap = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+            const isNum = v => typeof v === 'number';
+            const isInt = v => typeof v === 'number' && Number.isInteger(v);
+            const put = (o, k, v) => { if (k === '__proto__') Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true }); else o[k] = v; };
+            const newRec = () => ({});
+            const reEsc = s => String(s).replace(/[.*+?^${}()|[\]\\\/-]/g, '\\$&');
+            const cpCmp = (a, b) => { const x = Array.from(a), y = Array.from(b); const n = Math.min(x.length, y.length); for (let i = 0; i < n; i++) { const d = x[i].codePointAt(0) - y[i].codePointAt(0); if (d) return d; } return x.length - y.length; };
+            const sortedKeys = o => Object.keys(o).sort(cpCmp);
 
-        function getBodKeyCandidates(path) {
-            const flat = bodPathToFlatKey(path);
-            const parts = flat.split('_');
-            const shortSuffix = parts.length > 2 ? parts.slice(-2).join('_') : flat;
-            const leafOnly = parts[parts.length - 1];
-            const uniq = Array.from(new Set([flat, shortSuffix, leafOnly].filter(Boolean)));
-            return uniq.map(k => `"${k}"`).join(', ');
-        }
-
-        function buildPythonCondition(branch, direction) {
-            const rawField = branch.field.replace(/[{}]/g, '').trim();
-            const getter = direction === 'outbound'
-                ? `str(_pick(r, ${getBodKeyCandidates(rawField)})).strip()`
-                : `str(data.get("${rawField}", "")).strip()`;
-            const rhs = `"${String(branch.compareVal).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-            switch (branch.op) {
-                case '==': return `${getter} == ${rhs}`;
-                case '!=': return `${getter} != ${rhs}`;
-                case 'contains': return `${rhs} in ${getter}`;
-                case 'startsWith': return `${getter}.startswith(${rhs})`;
-                case '>': return `float(${getter} or 0) > ${Number(branch.compareVal) || 0}`;
-                case '<': return `float(${getter} or 0) < ${Number(branch.compareVal) || 0}`;
-                case 'isEmpty': return `${getter} == ""`;
-                case 'notEmpty': return `${getter} != ""`;
-                default: return `${getter} == ${rhs}`;
-            }
-        }
-
-        /*ION_SIMPLE_PY_START*/
-        function buildSimpleIonPython() {
-            const rootName = (typeof currentBodRootName === 'string' && currentBodRootName) ? currentBodRootName : '';
-            function detectVerb() {
-                if (!bodXmlDoc || !bodXmlDoc.documentElement) return 'Sync';
-                const kids = Array.from(bodXmlDoc.documentElement.childNodes).filter(n => n.nodeType === 1);
-                const da = kids.find(n => getLocalName(n.nodeName) === 'DataArea');
-                if (!da) return 'Sync';
-                const first = Array.from(da.childNodes).find(n => n.nodeType === 1);
-                return first ? getLocalName(first.nodeName) : 'Sync';
-            }
-            function bodtoKey(path) {
-                let parts = String(path || '').replace(/[{}]/g, '').trim().split('.').filter(Boolean);
-                if (!parts.length) return '';
-                let attr = '';
-                if (parts[parts.length - 1].charAt(0) === '@') attr = parts.pop();
-                const da = parts.indexOf('DataArea');
-                if (da >= 0) parts = parts.slice(da + 1);
-                else if (rootName && parts[0] === rootName) parts = parts.slice(1);
-                let key = parts.join('_');
-                if (attr) key += (key ? '_' : '') + attr;
-                return key;
-            }
-            function starKey(path, tag) {
-                const key = bodtoKey(path);
-                if (!tag) return key;
-                const marker = '_' + tag + '_';
-                const at = key.indexOf(marker);
-                if (at < 0) return key;
-                return key.slice(0, at + marker.length) + '*' + key.slice(at + marker.length - 1);
-            }
-            function isBareBodPath(s) {
-                const t = String(s || '').trim();
-                if (!t || /[\s{}]/.test(t)) return false;
-                const sources = (extractedPaths || []).map(p => p.path);
-                if (sources.includes(t)) return true;
-                return /^[A-Za-z_][\w:-]*(\.[@A-Za-z_][\w:.-]*)+$/.test(t);
-            }
-            function ruleFromRaw(raw, tag) {
-                const trimmed = String(raw ?? '').trim();
-                if (!trimmed) return '';
-                if (trimmed.toLowerCase() === 'true') return true;
-                if (trimmed.toLowerCase() === 'false') return false;
-                if (!trimmed.includes('{') && !trimmed.includes('}')) {
-                    if (isBareBodPath(trimmed)) return starKey(trimmed, tag);
-                    return trimmed;
+            function pyStrRepr(s) {
+                s = String(s);
+                const q = (s.includes("'") && !s.includes('"')) ? '"' : "'";
+                let out = '';
+                for (const ch of s) {
+                    const c = ch.codePointAt(0);
+                    if (ch === '\\') out += '\\\\';
+                    else if (ch === q) out += '\\' + q;
+                    else if (ch === '\n') out += '\\n';
+                    else if (ch === '\r') out += '\\r';
+                    else if (ch === '\t') out += '\\t';
+                    else if (c < 0x20 || c === 0x7f) out += '\\x' + c.toString(16).padStart(2, '0');
+                    else out += ch;
                 }
-                const tokens = parseExpression(trimmed, (extractedPaths || []).map(p => p.path));
-                if (tokens.length === 1 && tokens[0].type === 'path') return starKey(tokens[0].val, tag);
-                const parts = tokens.map(t => t.type === 'literal' ? t.val : '{' + starKey(t.val, tag) + '}');
-                return { template: parts.join('') };
+                return q + out + q;
             }
-            function ruleFromCond(rule, tag) {
-                if (!rule || !rule.branches || !rule.branches.length) return null;
-                const cases = rule.branches.map(b => {
-                    const field = String(b.field || '').replace(/[{}]/g, '').trim();
-                    const op = (b.op || '==').trim();
-                    const key = starKey(field, tag);
-                    const cond = {};
-                    const map = { '==': 'eq', '!=': 'ne', '>': 'gt', '>=': 'ge', '<': 'lt', '<=': 'le' };
-                    cond[map[op] || 'eq'] = ['{' + key + '}', b.compareVal];
-                    return { when: cond, then: ruleFromRaw(b.resultVal, tag) };
-                });
-                return { case: cases, default: ruleFromRaw(rule.elseVal || '', tag) };
+            function pyFloatRepr(x) {
+                if (Number.isNaN(x)) return 'nan';
+                if (!Number.isFinite(x)) return x > 0 ? 'inf' : '-inf';
+                if (x === 0) return Object.is(x, -0) ? '-0.0' : '0.0';
+                const [mant, expS] = x.toExponential().split('e');
+                const exp = parseInt(expS, 10);
+                const neg = mant.startsWith('-');
+                const digits = mant.replace('-', '').replace('.', '');
+                let body;
+                if (exp < -4 || exp >= 16) {
+                    body = digits[0] + (digits.length > 1 ? '.' + digits.slice(1) : '') + 'e' + (exp < 0 ? '-' : '+') + String(Math.abs(exp)).padStart(2, '0');
+                } else if (exp < 0) {
+                    body = '0.' + '0'.repeat(-exp - 1) + digits;
+                } else if (digits.length <= exp + 1) {
+                    body = digits + '0'.repeat(exp + 1 - digits.length) + '.0';
+                } else {
+                    body = digits.slice(0, exp + 1) + '.' + digits.slice(exp + 1);
+                }
+                return (neg ? '-' : '') + body;
             }
-            function collectRules(prefix, tag) {
-                const scope = prefix ? prefix + '[].' : '';
-                const obj = {};
-                document.querySelectorAll('#mapperContainer .mapping-input').forEach(inp => {
-                    const t = inp.dataset.target || '';
-                    if (scope) {
-                        if (!t.startsWith(scope) || t.slice(scope.length).includes('[]')) return;
-                    } else if (!t || t.includes('[]')) return;
-                    const raw = inp.value.trim();
-                    const rule = outboundRules[t];
-                    if ((!rule || !rule.branches || !rule.branches.length) && raw === '') return;
-                    const rel = scope ? t.slice(scope.length) : t;
-                    const leaf = rel.split('.').pop();
-                    let val = ruleFromCond(rule, tag);
-                    if (val == null) val = ruleFromRaw(raw, tag);
-                    if ((leaf === 'isActive' || leaf === 'usableInPurchase') && raw === 'Open') val = true;
-                    setNested(obj, rel, val);
+            // JSON numbers: integers print like Python ints, others like Python floats.
+            const numText = n => (isInt(n) && Math.abs(n) < 2 ** 53) ? String(n) : pyFloatRepr(n);
+            function pyRepr(v) {
+                if (v === null || v === undefined) return 'None';
+                if (v === true) return 'True';
+                if (v === false) return 'False';
+                if (isNum(v)) return numText(v);
+                if (typeof v === 'string') return pyStrRepr(v);
+                if (Array.isArray(v)) return '[' + v.map(pyRepr).join(', ') + ']';
+                return '{' + Object.keys(v).map(k => pyStrRepr(k) + ': ' + pyRepr(v[k])).join(', ') + '}';
+            }
+            function toText(v) {
+                if (v === null || v === undefined) return '';
+                if (typeof v === 'boolean') return v ? 'true' : 'false';
+                if (isNum(v)) return numText(v);
+                if (typeof v === 'string') return v;
+                return pyRepr(v);
+            }
+            const isEmpty = v => v === null || v === undefined || (typeof v === 'string' && strip(v) === '');
+            const FLOAT_RE = /^[+-]?(?:(?:inf|infinity|nan)|(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?)$/i;
+            function toNumber(v) {
+                if (typeof v === 'boolean' || v === null || v === undefined) return null;
+                if (isNum(v)) return v;
+                if (typeof v !== 'string') return null;
+                const s = strip(v);
+                if (!FLOAT_RE.test(s)) return null;
+                const low = s.toLowerCase().replace(/^[+-]/, '');
+                const sign = s.startsWith('-') ? -1 : 1;
+                if (low === 'inf' || low === 'infinity') return sign * Infinity;
+                if (low === 'nan') return NaN;
+                return Number(s.replace(/_/g, ''));
+            }
+            function pySlice(text, start, end) {
+                const cps = Array.from(text); const n = cps.length;
+                const norm = (i, dflt) => { if (i === null || i === undefined) return dflt; if (i < 0) return Math.max(0, n + i); return Math.min(i, n); };
+                const a = norm(start, 0), b = norm(end, n);
+                return b > a ? cps.slice(a, b).join('') : '';
+            }
+            const upper = s => s.toUpperCase();
+            const lower = s => s.toLowerCase();
+
+            // ---------- operators (transforms.compare) ----------
+            const OP_ALIASES = { '==': 'eq', '!=': 'ne', '>': 'gt', '>=': 'ge', '<': 'lt', '<=': 'le', 'gte': 'ge', 'lte': 'le', 'not_exists': 'missing', 'startswith': 'starts_with', 'endswith': 'ends_with' };
+            const OPS = new Set(['eq', 'ne', 'gt', 'ge', 'lt', 'le', 'in', 'not_in', 'contains', 'not_contains', 'starts_with', 'ends_with', 'exists', 'missing', 'empty', 'not_empty']);
+            const UNARY_OPS = new Set(['exists', 'missing', 'empty', 'not_empty']);
+            const COND_KEYS = new Set(['path', 'expr', 'op', 'value', 'ignore_case']);
+            const alias = raw => (has(OP_ALIASES, raw) ? OP_ALIASES[raw] : raw);
+            function normalizeOp(raw) {
+                if (typeof raw !== 'string') throw new BODTransformError("'op' must be a string.");
+                const op = alias(raw);
+                if (!OPS.has(op)) throw new BODTransformError(`Unknown operator '${raw}'.`);
+                return op;
+            }
+            function equals(left, right, ic) {
+                if (typeof right === 'boolean' || typeof left === 'boolean') return lower(strip(toText(left))) === lower(strip(toText(right)));
+                if (isNum(right) || isNum(left)) {
+                    const ln = toNumber(left), rn = toNumber(right);
+                    if (ln !== null && rn !== null) return ln === rn;
+                }
+                const lt = toText(left), rt = toText(right);
+                return ic ? lower(lt) === lower(rt) : lt === rt;
+            }
+            function compare(op, left, exists, right, ic) {
+                if (op === 'exists') return exists;
+                if (op === 'missing') return !exists;
+                if (op === 'empty') return isEmpty(left);
+                if (op === 'not_empty') return !isEmpty(left);
+                if (op === 'in' || op === 'not_in') { const hit = right.some(o => equals(left, o, ic)); return op === 'in' ? hit : !hit; }
+                if (op === 'eq') return equals(left, right, ic);
+                if (op === 'ne') return !equals(left, right, ic);
+                let lt = toText(left), rt = toText(right);
+                if (ic) { lt = lower(lt); rt = lower(rt); }
+                if (op === 'contains') return lt.includes(rt);
+                if (op === 'not_contains') return !lt.includes(rt);
+                if (op === 'starts_with') return lt.startsWith(rt);
+                if (op === 'ends_with') return lt.endsWith(rt);
+                const ln = toNumber(left), rn = toNumber(right);
+                let d;
+                if (ln !== null && rn !== null) d = ln < rn ? -1 : (ln > rn ? 1 : (ln === rn ? 0 : NaN));
+                else if (left === null || left === undefined || right === null || right === undefined) return false;
+                else d = cpCmp(lt, rt);
+                if (op === 'gt') return d > 0;
+                if (op === 'ge') return d >= 0;
+                if (op === 'lt') return d < 0;
+                return d <= 0;
+            }
+
+            // ---------- XML -> flattened records (BODConverter) ----------
+            const localName = n => { const s = n.localName || n.nodeName || ''; const i = s.indexOf(':'); return i >= 0 ? s.slice(i + 1) : s; };
+            const elemChildren = el => Array.from(el.childNodes || []).filter(n => n.nodeType === 1);
+            function leadText(el) {
+                let t = '';
+                for (const n of Array.from(el.childNodes || [])) {
+                    if (n.nodeType === 1) break;
+                    if (n.nodeType === 3 || n.nodeType === 4) t += n.nodeValue;
+                }
+                return t;
+            }
+            function attrsOf(el) {
+                const out = [];
+                for (const a of Array.from(el.attributes || [])) {
+                    if (a.name === 'xmlns' || a.name.startsWith('xmlns:')) continue;
+                    out.push([a.localName || a.name.split(':').pop(), a.value]);
+                }
+                return out;
+            }
+            function parseXml(xml) {
+                if (xml && typeof xml === 'object' && (xml.documentElement || xml.nodeType === 1)) return xml.documentElement || xml;
+                const text = String(xml);
+                if (/<!DOCTYPE|<!ENTITY/i.test(text)) throw new BODParseError('DOCTYPE and ENTITY declarations are not allowed.');
+                let doc;
+                try { doc = new DOMParser().parseFromString(text.replace(/^\uFEFF/, ''), 'text/xml'); }
+                catch (e) { throw new BODParseError('Failed to parse XML: ' + e.message); }
+                const err = doc && doc.getElementsByTagName && doc.getElementsByTagName('parsererror')[0];
+                if (!doc || !doc.documentElement || err) throw new BODParseError('Failed to parse XML: ' + (err ? strip(err.textContent || '').split('\n')[0] : 'no root element'));
+                return doc.documentElement;
+            }
+            function flattenGroups(el, prefix, sep, out) {
+                const groups = new Map();
+                for (const c of elemChildren(el)) { const t = localName(c); if (!groups.has(t)) groups.set(t, []); groups.get(t).push(c); }
+                for (const [tag, list] of groups) {
+                    if (list.length === 1) flattenElement(list[0], prefix, sep, out);
+                    else list.forEach((c, i) => flattenBody(c, `${prefix}${sep}${tag}${sep}${i}`, sep, out));
+                }
+            }
+            function flattenBody(el, cur, sep, out) {
+                const attrs = attrsOf(el);
+                for (const [k, v] of attrs) put(out, `${cur}${sep}@${k}`, v);
+                const kids = elemChildren(el);
+                const raw = leadText(el);
+                const text = raw && strip(raw) ? strip(raw) : null;
+                if (!kids.length) {
+                    if (attrs.length) { if (text !== null) put(out, `${cur}${sep}#text`, text); }
+                    else put(out, cur, text);
+                    return;
+                }
+                if (text !== null) put(out, `${cur}${sep}#text`, text);
+                flattenGroups(el, cur, sep, out);
+            }
+            function flattenElement(el, prefix, sep, out) {
+                const tag = localName(el);
+                flattenBody(el, prefix ? `${prefix}${sep}${tag}` : tag, sep, out);
+                return out;
+            }
+            function findDirect(el, name) {
+                if (!el) return null;
+                for (const c of elemChildren(el)) if (localName(c) === name) return c;
+                return localName(el) === name ? el : null;
+            }
+            function findLocal(el, name) {
+                if (!el) return null;
+                if (localName(el) === name) return el;
+                const stack = elemChildren(el).reverse();
+                while (stack.length) { const n = stack.pop(); if (localName(n) === name) return n; stack.push(...elemChildren(n).reverse()); }
+                return null;
+            }
+            function detectVerbIn(dataArea, pnode) {
+                const kids = elemChildren(dataArea);
+                if (kids.length < 2) throw new BODStructureError(`Cannot detect the verb: '${pnode}' needs a verb and at least one noun.`);
+                return localName(kids[0]);
+            }
+            function detectVerb(xml, opts = {}) {
+                const pnode = opts.pnode || 'DataArea';
+                const da = findDirect(parseXml(xml), pnode);
+                if (!da) throw new BODStructureError(`Target node '${pnode}' not found.`);
+                return detectVerbIn(da, pnode);
+            }
+            function toRecords(xml, verb = null, includeHeader = false, opts = {}) {
+                const sep = opts.separator || '_';
+                const pnode = opts.pnode || 'DataArea';
+                const root = parseXml(xml);
+                const da = findDirect(root, pnode);
+                if (!da) throw new BODStructureError(`Target node '${pnode}' not found.`);
+                if (verb === null || verb === undefined) verb = detectVerbIn(da, pnode);
+                const verbNode = findDirect(da, verb);
+                if (!verbNode) throw new BODStructureError(`Verb '${verb}' not found under '${pnode}'.`);
+                const header = newRec();
+                if (includeHeader) {
+                    const app = findLocal(root, 'ApplicationArea');
+                    if (app) flattenElement(app, '', sep, header);
+                    flattenElement(verbNode, '', sep, header);
+                }
+                if (verbNode === da || verbNode.parentNode !== da) throw new BODStructureError(`Verb '${verb}' is not a direct child of '${pnode}'.`);
+                const nouns = elemChildren(da).filter(n => n !== verbNode);
+                if (!nouns.length) throw new BODStructureError(`No Noun element found inside '${pnode}'.`);
+                const compiled = opts.rules ? compileRules(opts.rules, sep) : null;
+                return nouns.map(n => {
+                    const rec = newRec();
+                    for (const k of Object.keys(header)) put(rec, k, header[k]);
+                    const flat = flattenElement(n, '', sep, newRec());
+                    for (const k of Object.keys(flat)) put(rec, k, flat[k]);
+                    return compiled ? compiled.apply(rec) : rec;
                 });
-                document.querySelectorAll('#mapperContainer .array-repeat-input').forEach(a => {
-                    const name = a.dataset.array || '';
-                    if (scope) {
-                        if (!name.startsWith(scope) || name.slice(scope.length).includes('[]')) return;
-                    } else if (!name || name.includes('[]')) return;
-                    const childTag = String(a.value || '').trim();
-                    const rel = scope ? name.slice(scope.length) : name;
-                    const item = collectRules(name, childTag);
-                    let repeat = '';
-                    if (childTag) {
-                        const hit = (extractedPaths || []).map(p => bodtoKey(p.path)).find(k => k.includes('_' + childTag + '_') || k.endsWith('_' + childTag) || k === childTag);
-                        if (hit) {
-                            const marker = '_' + childTag;
-                            const at = hit.indexOf(marker);
-                            repeat = (at >= 0 ? hit.slice(0, at + marker.length) : hit) + '_*';
-                        } else {
-                            repeat = childTag + '_*';
+            }
+
+            // ---------- 2.5 flat rules (TransformRules) ----------
+            const EXPR_KEYS = { path: ['default'], literal: [], concat: ['sep', 'skip_empty'], template: [], if: ['then', 'else'], case: ['when', 'default', 'ignore_case'], coalesce: [], upper: [], lower: [], trim: [], replace: ['old', 'new'], substr: ['start', 'end'], number: ['default'] };
+            const NON_EXPR_KEYS = new Set(['match', 'sep', 'old', 'new', 'start', 'end', 'op', 'ignore_case', 'skip_empty']);
+            const PH_RE = () => /\{\{|\}\}|\{([^{}]+)\}/g;
+            const MAX_RULE_DEPTH = 64, MAX_RULES = 10000, MAX_TEMPLATE_DEPTH = 128;
+            const LEGACY_WRAPPER_KEYS = ['rules', 'mode', 'drop', 'description', 'version'];
+            const isIntArg = v => v === null || v === undefined || isInt(v);
+            const sortBindings = (a, b) => { for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i]; return a.length - b.length; };
+
+            class TransformRules {
+                constructor(config, separator = '_', defaultMode = 'merge') {
+                    if (typeof config === 'string') {
+                        try { config = JSON.parse(config); } catch (e) { throw new BODTransformError('Rules are not valid JSON: ' + e.message); }
+                    }
+                    if (!isMap(config)) throw new BODTransformError('Rules must be a JSON object / dict.');
+                    if (!separator) throw new BODTransformError('Separator must be a non-empty string.');
+                    this.separator = separator;
+                    let rules, mode, drop;
+                    if (has(config, 'rules') && isMap(config.rules)) {
+                        const extra = Object.keys(config).filter(k => !LEGACY_WRAPPER_KEYS.includes(k)).sort(cpCmp);
+                        if (extra.length) throw new BODTransformError(`Unknown top-level rule keys: ${extra.join(', ')}.`);
+                        rules = config.rules; mode = has(config, 'mode') ? config.mode : defaultMode; drop = has(config, 'drop') ? config.drop : [];
+                    } else { rules = config; mode = defaultMode; drop = []; }
+                    if (mode !== 'merge' && mode !== 'only') throw new BODTransformError("mode must be 'merge' or 'only'.");
+                    if (!Array.isArray(drop) || !drop.every(d => typeof d === 'string')) throw new BODTransformError('drop must be a list of strings.');
+                    if (Object.keys(rules).length > MAX_RULES) throw new BODTransformError(`Too many rules (max ${MAX_RULES}).`);
+                    this.mode = mode;
+                    this.drop = drop.slice();
+                    this._dropRes = drop.map(d => new RegExp('^' + d.split('*').map(reEsc).join('.*') + '$'));
+                    this._rules = [];
+                    for (const target of Object.keys(rules)) {
+                        const expr = rules[target];
+                        if (!target) throw new BODTransformError('Rule targets must be non-empty strings.');
+                        try { this._validateExpr(expr, 0); }
+                        catch (e) { if (e instanceof BODTransformError) throw new BODTransformError(`Rule '${target}': ${e.message}`); throw e; }
+                        const stars = this._countStars(target);
+                        const starred = this._collectPaths(expr).filter(p => this._countStars(p));
+                        for (const p of starred) {
+                            if (this._countStars(p) !== stars) throw new BODTransformError(`Rule '${target}': path '${p}' has ${this._countStars(p)} '*' segment(s) but the target has ${stars}.`);
+                        }
+                        if (stars && !starred.length) throw new BODTransformError(`Rule '${target}': a '*' target needs at least one '*' path.`);
+                        this._rules.push({ target, expr, stars, starred });
+                    }
+                }
+                get targets() { return this._rules.map(r => r.target); }
+                apply(record) {
+                    if (!isMap(record)) throw new BODTransformError('Each record must be a JSON object / dict.');
+                    let out = newRec();
+                    if (this.mode === 'merge') for (const k of Object.keys(record)) put(out, k, record[k]);
+                    const source = record;
+                    const lookup = key => (has(out, key) ? [true, out[key]] : (has(source, key) ? [true, source[key]] : [false, null]));
+                    const allKeys = () => { const seen = new Set(Object.keys(out)); return Object.keys(out).concat(Object.keys(source).filter(k => !seen.has(k))); };
+                    for (const rule of this._rules) {
+                        if (!rule.stars) { put(out, rule.target, this._eval(rule.expr, lookup, [])); continue; }
+                        for (const b of this._bindings(rule, allKeys())) put(out, this._bind(rule.target, b), this._eval(rule.expr, lookup, b));
+                    }
+                    if (this._dropRes.length) {
+                        const prot = new Set(this.targets); const kept = newRec();
+                        for (const k of Object.keys(out)) if (prot.has(k) || !this._dropRes.some(r => r.test(k))) put(kept, k, out[k]);
+                        out = kept;
+                    }
+                    return out;
+                }
+                applyMany(records) { return records.map(r => this.apply(r)); }
+                _countStars(p) { return String(p).split(this.separator).filter(s => s === '*').length; }
+                _validatePath(path) {
+                    if (typeof path !== 'string' || !path) throw new BODTransformError('A path must be a non-empty string.');
+                    const segs = path.split(this.separator);
+                    if (segs[0] === '*') throw new BODTransformError(`Path '${path}' cannot start with '*'.`);
+                    for (const s of segs) if (s.includes('*') && s !== '*') throw new BODTransformError(`Path '${path}': '*' must be a whole segment (e.g. Line${this.separator}*).`);
+                }
+                _validateExpr(expr, depth) {
+                    if (depth > MAX_RULE_DEPTH) throw new BODTransformError(`Rule nesting deeper than ${MAX_RULE_DEPTH}.`);
+                    if (expr === null || expr === undefined || typeof expr === 'boolean' || isNum(expr)) return;
+                    if (typeof expr === 'string') { if (expr.startsWith('$') && !expr.startsWith('$$')) this._validatePath(expr.slice(1)); return; }
+                    if (Array.isArray(expr)) throw new BODTransformError("Lists are not expressions; wrap literal lists as {'literal': [...]}.");
+                    const ops = Object.keys(expr).filter(k => has(EXPR_KEYS, k));
+                    if (ops.length !== 1) throw new BODTransformError('An expression object needs exactly one operator key out of: ' + Object.keys(EXPR_KEYS).sort(cpCmp).join(', ') + ` (got ${pyRepr(sortedKeys(expr))}).`);
+                    const op = ops[0];
+                    const unknown = Object.keys(expr).filter(k => k !== op && !EXPR_KEYS[op].includes(k)).sort(cpCmp);
+                    if (unknown.length) throw new BODTransformError(`'${op}' does not accept: ${unknown.join(', ')}.`);
+                    const arg = expr[op], nxt = depth + 1;
+                    const get = k => (has(expr, k) ? expr[k] : null);
+                    if (op === 'path') { this._validatePath(typeof arg === 'string' && arg.startsWith('$') ? arg.slice(1) : arg); this._validateExpr(get('default'), nxt); }
+                    else if (op === 'literal') { /* any value */ }
+                    else if (op === 'concat' || op === 'coalesce') {
+                        if (!Array.isArray(arg)) throw new BODTransformError(`'${op}' needs a list.`);
+                        arg.forEach(i => this._validateExpr(i, nxt));
+                        if (op === 'concat') {
+                            if (has(expr, 'sep') && typeof expr.sep !== 'string') throw new BODTransformError("'sep' must be a string.");
+                            if (has(expr, 'skip_empty') && typeof expr.skip_empty !== 'boolean') throw new BODTransformError("'skip_empty' must be true or false.");
+                        }
+                    } else if (op === 'template') {
+                        if (typeof arg !== 'string') throw new BODTransformError("'template' needs a string.");
+                        for (const m of arg.matchAll(PH_RE())) if (m[1] !== undefined) this._validatePath(strip(m[1]));
+                    } else if (op === 'if') {
+                        if (Array.isArray(arg)) {
+                            if (!arg.length) throw new BODTransformError("'if' branch list is empty.");
+                            for (const br of arg) {
+                                if (!isMap(br) || Object.keys(br).length !== 2 || !has(br, 'when') || !has(br, 'then')) throw new BODTransformError("Each 'if' branch must be {'when': condition, 'then': value}.");
+                                this._validateCond(br.when, nxt); this._validateExpr(br.then, nxt);
+                            }
+                            if (has(expr, 'then')) throw new BODTransformError("Use 'then' inside each branch of a list 'if'.");
+                        } else { this._validateCond(arg, nxt); this._validateExpr(get('then'), nxt); }
+                        this._validateExpr(get('else'), nxt);
+                    } else if (op === 'case') {
+                        this._validateExpr(arg, nxt);
+                        const when = expr.when;
+                        if (isMap(when)) Object.values(when).forEach(v => this._validateExpr(v, nxt));
+                        else if (Array.isArray(when)) {
+                            for (const br of when) {
+                                if (!isMap(br) || Object.keys(br).length !== 2 || !has(br, 'match') || !has(br, 'then')) throw new BODTransformError("Each 'case' branch must be {'match': value(s), 'then': value}.");
+                                this._validateExpr(br.then, nxt);
+                            }
+                        } else throw new BODTransformError("'case' needs a 'when' object or list.");
+                        this._validateExpr(get('default'), nxt);
+                        if (has(expr, 'ignore_case') && typeof expr.ignore_case !== 'boolean') throw new BODTransformError("'ignore_case' must be true or false.");
+                    } else if (op === 'upper' || op === 'lower' || op === 'trim') this._validateExpr(arg, nxt);
+                    else if (op === 'replace') {
+                        this._validateExpr(arg, nxt);
+                        if (typeof expr.old !== 'string' || !expr.old) throw new BODTransformError("'replace' needs a non-empty 'old' string.");
+                        if (has(expr, 'new') && typeof expr.new !== 'string') throw new BODTransformError("'replace' needs a string 'new'.");
+                    } else if (op === 'substr') {
+                        this._validateExpr(arg, nxt);
+                        for (const k of ['start', 'end']) if (!isIntArg(expr[k])) throw new BODTransformError(`'substr' ${k} must be an integer.`);
+                    } else if (op === 'number') { this._validateExpr(arg, nxt); this._validateExpr(get('default'), nxt); }
+                }
+                _validateCond(cond, depth) {
+                    if (depth > MAX_RULE_DEPTH) throw new BODTransformError(`Rule nesting deeper than ${MAX_RULE_DEPTH}.`);
+                    if (typeof cond === 'boolean') return;
+                    if (typeof cond === 'string') {
+                        if (!cond.startsWith('$') || cond.startsWith('$$')) throw new BODTransformError(`A string condition must be a '$path' reference (got ${pyStrRepr(cond)}).`);
+                        this._validatePath(cond.slice(1)); return;
+                    }
+                    if (!isMap(cond)) throw new BODTransformError("A condition must be an object, '$path', or boolean.");
+                    for (const combo of ['all', 'any', 'and', 'or']) {
+                        if (has(cond, combo)) {
+                            if (Object.keys(cond).length !== 1 || !Array.isArray(cond[combo])) throw new BODTransformError(`'${combo}' needs a list of conditions only.`);
+                            cond[combo].forEach(c => this._validateCond(c, depth + 1)); return;
                         }
                     }
-                    setNested(obj, rel, repeat ? { repeat: repeat, item: item } : [item]);
-                });
-                return obj;
-            }
-            function setNested(obj, path, val) {
-                const parts = String(path).split('.');
-                let cur = obj;
-                for (let i = 0; i < parts.length - 1; i++) {
-                    if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
-                    cur = cur[parts[i]];
+                    if (has(cond, 'not')) {
+                        if (Object.keys(cond).length !== 1) throw new BODTransformError("'not' takes a single condition.");
+                        this._validateCond(cond.not, depth + 1); return;
+                    }
+                    const unknown = Object.keys(cond).filter(k => !COND_KEYS.has(k)).sort(cpCmp);
+                    if (unknown.length) throw new BODTransformError(`Unknown condition keys: ${unknown.join(', ')}.`);
+                    if (has(cond, 'path') === has(cond, 'expr')) throw new BODTransformError("A condition needs exactly one of 'path' or 'expr'.");
+                    if (has(cond, 'path')) { const p = cond.path; this._validatePath(typeof p === 'string' && p.startsWith('$') ? p.slice(1) : p); }
+                    else this._validateExpr(cond.expr, depth + 1);
+                    const op = normalizeOp(has(cond, 'op') ? cond.op : (has(cond, 'value') ? 'eq' : 'not_empty'));
+                    if (!UNARY_OPS.has(op) && !has(cond, 'value')) throw new BODTransformError(`Operator '${op}' needs a 'value'.`);
+                    if (op === 'in' || op === 'not_in') {
+                        if (!Array.isArray(cond.value)) throw new BODTransformError(`Operator '${op}' needs a list 'value'.`);
+                        cond.value.forEach(v => this._validateExpr(v, depth + 1));
+                    } else if (has(cond, 'value')) this._validateExpr(cond.value, depth + 1);
+                    if (has(cond, 'ignore_case') && typeof cond.ignore_case !== 'boolean') throw new BODTransformError("'ignore_case' must be true or false.");
                 }
-                cur[parts[parts.length - 1]] = val;
+                _collectPaths(expr) {
+                    const found = [];
+                    const walk = node => {
+                        if (typeof node === 'string') { if (node.startsWith('$') && !node.startsWith('$$')) found.push(node.slice(1)); }
+                        else if (Array.isArray(node)) node.forEach(walk);
+                        else if (isMap(node)) {
+                            for (const k of Object.keys(node)) {
+                                const v = node[k];
+                                if (k === 'literal') continue;
+                                if (k === 'path' && typeof v === 'string') found.push(v.startsWith('$') ? v.slice(1) : v);
+                                else if (k === 'template' && typeof v === 'string') { for (const m of v.matchAll(PH_RE())) if (m[1] !== undefined) found.push(strip(m[1])); }
+                                else if (NON_EXPR_KEYS.has(k)) continue;
+                                else walk(v);
+                            }
+                        }
+                    };
+                    walk(expr);
+                    return found;
+                }
+                _starRegex(path) {
+                    const sep = reEsc(this.separator);
+                    let out = '';
+                    path.split(this.separator).forEach((seg, i) => { out += seg === '*' ? `(?:${sep}(\\d+))?` : (i ? sep : '') + reEsc(seg); });
+                    return new RegExp(`^${out}(?:${sep}#text)?$`);
+                }
+                _bindings(rule, keys) {
+                    const res = rule.starred.map(p => this._starRegex(p));
+                    const found = new Map();
+                    for (const key of keys) for (const rx of res) {
+                        const m = rx.exec(key);
+                        if (m) { const g = m.slice(1).map(x => (x === undefined ? null : x)); const id = JSON.stringify(g); if (!found.has(id)) found.set(id, g); }
+                    }
+                    const sk = b => b.map(g => (g === null ? -1 : parseInt(g, 10)));
+                    return Array.from(found.values()).sort((a, b) => sortBindings(sk(a), sk(b)));
+                }
+                _bind(path, binding) {
+                    if (!binding || !binding.length) return path;
+                    let i = 0; const out = [];
+                    for (const seg of path.split(this.separator)) {
+                        if (seg === '*') { const v = i < binding.length ? binding[i++] : null; if (v !== null) out.push(v); }
+                        else out.push(seg);
+                    }
+                    return out.join(this.separator);
+                }
+                _resolve(path, lookup, b) {
+                    const key = (b && b.length) ? this._bind(path, b) : path;
+                    let r = lookup(key);
+                    if (!r[0]) r = lookup(`${key}${this.separator}#text`);
+                    return r;
+                }
+                _eval(expr, lookup, b) {
+                    if (expr === null || expr === undefined || typeof expr === 'boolean' || isNum(expr)) return expr === undefined ? null : expr;
+                    if (typeof expr === 'string') {
+                        if (expr.startsWith('$$')) return expr.slice(1);
+                        if (expr.startsWith('$')) return this._resolve(expr.slice(1), lookup, b)[1];
+                        return expr;
+                    }
+                    const op = Object.keys(expr).find(k => has(EXPR_KEYS, k));
+                    const arg = expr[op];
+                    const ev = e => this._eval(e === undefined ? null : e, lookup, b);
+                    if (op === 'path') {
+                        const p = arg.startsWith('$') ? arg.slice(1) : arg;
+                        const [ok, val] = this._resolve(p, lookup, b);
+                        if ((!ok || val === null) && has(expr, 'default')) return ev(expr.default);
+                        return val;
+                    }
+                    if (op === 'literal') return arg;
+                    if (op === 'concat') {
+                        let parts = arg.map(ev);
+                        if (!has(expr, 'skip_empty') || expr.skip_empty) parts = parts.filter(p => !isEmpty(p));
+                        return parts.map(toText).join(has(expr, 'sep') ? expr.sep : '');
+                    }
+                    if (op === 'template') return arg.replace(PH_RE(), (m0, g1) => (m0 === '{{' ? '{' : m0 === '}}' ? '}' : toText(this._resolve(strip(g1), lookup, b)[1])));
+                    if (op === 'if') {
+                        if (Array.isArray(arg)) { for (const br of arg) if (this._cond(br.when, lookup, b)) return ev(br.then); return ev(expr.else); }
+                        return ev(this._cond(arg, lookup, b) ? expr.then : expr.else);
+                    }
+                    if (op === 'case') {
+                        const ic = !!expr.ignore_case;
+                        let key = strip(toText(ev(arg)));
+                        if (ic) key = lower(key);
+                        const when = expr.when;
+                        if (isMap(when)) { for (const k of Object.keys(when)) if ((ic ? lower(strip(k)) : strip(k)) === key) return ev(when[k]); }
+                        else for (const br of when) {
+                            const ms = Array.isArray(br.match) ? br.match : [br.match];
+                            for (const mv of ms) { const c = strip(toText(mv)); if ((ic ? lower(c) : c) === key) return ev(br.then); }
+                        }
+                        return ev(expr.default);
+                    }
+                    if (op === 'coalesce') { for (const e of arg) { const v = ev(e); if (!isEmpty(v)) return v; } return null; }
+                    if (op === 'upper' || op === 'lower' || op === 'trim') {
+                        const v = ev(arg); if (v === null) return null;
+                        const t = toText(v); return op === 'upper' ? upper(t) : op === 'lower' ? lower(t) : strip(t);
+                    }
+                    if (op === 'replace') { const v = ev(arg); if (v === null) return null; return toText(v).split(expr.old).join(has(expr, 'new') ? expr.new : ''); }
+                    if (op === 'substr') { const v = ev(arg); if (v === null) return null; return pySlice(toText(v), expr.start, expr.end); }
+                    const num = toNumber(ev(arg));
+                    if (num === null) return ev(expr.default);
+                    return num;
+                }
+                _cond(cond, lookup, b) {
+                    if (typeof cond === 'boolean') return cond;
+                    if (typeof cond === 'string') return !isEmpty(this._resolve(cond.slice(1), lookup, b)[1]);
+                    for (const c of ['all', 'and']) if (has(cond, c)) return cond[c].every(x => this._cond(x, lookup, b));
+                    for (const c of ['any', 'or']) if (has(cond, c)) return cond[c].some(x => this._cond(x, lookup, b));
+                    if (has(cond, 'not')) return !this._cond(cond.not, lookup, b);
+                    let exists, left;
+                    if (has(cond, 'path')) { const p = cond.path; [exists, left] = this._resolve(p.startsWith('$') ? p.slice(1) : p, lookup, b); }
+                    else { left = this._eval(cond.expr, lookup, b); exists = left !== null; }
+                    const op = normalizeOp(has(cond, 'op') ? cond.op : (has(cond, 'value') ? 'eq' : 'not_empty'));
+                    const ic = !!cond.ignore_case;
+                    if (UNARY_OPS.has(op)) return compare(op, left, exists, null, ic);
+                    const right = (op === 'in' || op === 'not_in') ? cond.value.map(v => this._eval(v, lookup, b)) : this._eval(cond.value, lookup, b);
+                    return compare(op, left, exists, right, ic);
+                }
             }
-            const verb = detectVerb();
-            const rules = collectRules('', '');
-            const pyRules = JSON.stringify(rules, null, 2);
-            return `import json
-from BODtoJSON import to_records
+            const compileRules = (rules, separator = '_', defaultMode = 'merge') => (rules instanceof TransformRules ? rules : new TransformRules(rules, separator, defaultMode));
 
-# BODtoJSON rules. Pass to to_records / project if your version accepts rules=.
-# apply() is the portable engine that works on every version.
+            // ---------- 2.6 output templates (Mapper) ----------
+            const TEMPLATE_OPS = [['repeat', ['item', 'where']], ['if', ['then', 'else']], ['case', ['when', 'default', 'ignore_case']], ['concat', ['sep', 'skip_empty']], ['template', []], ['coalesce', []], ['upper', []], ['lower', []], ['trim', []], ['number', ['default']], ['replace', ['old', 'new']], ['substr', ['start', 'end']], ['literal', []], ['path', ['default']]];
+            function templateOp(node) {
+                const keys = Object.keys(node);
+                for (const [op, extra] of TEMPLATE_OPS) if (has(node, op) && keys.every(k => k === op || extra.includes(k))) return op;
+                return null;
+            }
+            function cleanPath(path) {
+                path = strip(path);
+                if (path.startsWith('{') && path.endsWith('}') && !path.startsWith('{{')) path = strip(path.slice(1, -1));
+                if (path.startsWith('$')) path = path.slice(1);
+                return path;
+            }
+            function loadRules(rules) {
+                if (typeof rules === 'string') {
+                    const text = strip(rules).replace(/^\uFEFF/, '');
+                    if (!(text.startsWith('{') || text.startsWith('['))) throw new BODTransformError(`Rules must be a dict, JSON text, or an existing file path (got ${pyStrRepr(text.slice(0, 80))}).`);
+                    try { return JSON.parse(text); } catch (e) { throw new BODTransformError('Rules are not valid JSON: ' + e.message); }
+                }
+                return rules;
+            }
+            const mentionsDollar = n => (typeof n === 'string' ? n.startsWith('$') : Array.isArray(n) ? n.some(mentionsDollar) : isMap(n) ? Object.values(n).some(mentionsDollar) : false);
+            function hasPlainPath(node) {
+                const op = templateOp(node);
+                if (['upper', 'lower', 'trim', 'number', 'replace', 'substr'].includes(op)) { const a = node[op]; return typeof a === 'string' && !a.startsWith('$'); }
+                if (op === 'concat' || op === 'coalesce') {
+                    const a = node[op];
+                    const items = typeof a === 'string' ? Array.from(a) : Array.isArray(a) ? a : isMap(a) ? Object.keys(a) : null;
+                    if (items === null) throw new TypeError(`'${a === null ? 'NoneType' : typeof a === 'boolean' ? 'bool' : Number.isInteger(a) ? 'int' : 'float'}' object is not iterable`);
+                    return items.some(x => typeof x === 'string' && !x.startsWith('$'));
+                }
+                return false;
+            }
+            function isTemplateRules(rules) {
+                if (!isMap(rules)) return true;
+                if (isMap(rules.rules) && Object.keys(rules).every(k => LEGACY_WRAPPER_KEYS.includes(k))) return false;
+                let sawDollar = false;
+                for (const value of Object.values(rules)) {
+                    if (typeof value === 'string') { if (!value.startsWith('$')) return true; sawDollar = true; }
+                    else if (Array.isArray(value)) return true;
+                    else if (isMap(value)) {
+                        if (templateOp(value) === null || has(value, 'repeat')) return true;
+                        if (mentionsDollar(value)) sawDollar = true;
+                        else if (hasPlainPath(value)) return true;
+                    }
+                }
+                if (!sawDollar) return true;
+                try { new TransformRules(rules); } catch (e) { if (e instanceof BODTransformError) return true; throw e; }
+                return false;
+            }
+            function lessThan(a, b) { for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] < b[i]; return a.length < b.length; }
 
-RULES = ${pyRules}
+            class Mapper {
+                constructor(rules, { kind = 'auto', missing = null, separator = '_' } = {}) {
+                    if (!['auto', 'template', 'flat'].includes(kind)) throw new BODTransformError("kind must be 'auto', 'template' or 'flat'.");
+                    if (!separator) throw new BODTransformError('Separator must be a non-empty string.');
+                    const cfg = loadRules(rules);
+                    this.separator = separator;
+                    this.missing = missing;
+                    if (kind === 'auto') kind = isTemplateRules(cfg) ? 'template' : 'flat';
+                    this.kind = kind;
+                    this._flat = null;
+                    if (kind === 'flat') this._flat = new TransformRules(cfg, separator);
+                    else this._validate(cfg, '$', 0);
+                    this.template = cfg;
+                }
+                apply(record) {
+                    if (!isMap(record)) throw new BODTransformError('Each record must be a dict.');
+                    if (this._flat) return this._flat.apply(record);
+                    const roots = new Set(Object.keys(record).map(k => k.split(this.separator)[0]));
+                    return this._eval(this.template, { record, roots, frames: [] });
+                }
+                toData(xml, verb = null, { single = false, includeHeader = true } = {}) {
+                    const recs = toRecords(xml, verb, includeHeader, { separator: this.separator });
+                    return single ? this.apply(recs[0]) : recs.map(r => this.apply(r));
+                }
+                toJson(xml, verb = null, { single = false, includeHeader = true, indent = null } = {}) {
+                    return JSON.stringify(this.toData(xml, verb, { single, includeHeader }), null, indent || undefined);
+                }
+                // --- validation (once, with the location of the problem) ---
+                _err(loc, msg) { return new BODTransformError(`Rule at '${loc}': ${msg}`); }
+                _validatePath(path, loc) {
+                    if (typeof path !== 'string' || !cleanPath(path)) throw this._err(loc, 'a path must be a non-empty string.');
+                    for (const seg of cleanPath(path).split(this.separator)) {
+                        if (seg.includes('*') && seg !== '*') throw this._err(loc, `'*' must be a whole path segment in ${pyStrRepr(path)} (e.g. Line${this.separator}*).`);
+                    }
+                }
+                _validate(node, loc, depth) {
+                    if (depth > MAX_TEMPLATE_DEPTH) throw this._err(loc, `template nesting deeper than ${MAX_TEMPLATE_DEPTH}.`);
+                    if (node === null || node === undefined || typeof node === 'boolean' || isNum(node)) return;
+                    if (typeof node === 'string') {
+                        const ms = Array.from(node.matchAll(PH_RE()));
+                        if (ms.length) { for (const m of ms) if (m[1] !== undefined) this._validatePath(m[1], loc); }
+                        else if (strip(node)) this._validatePath(node, loc);
+                        return;
+                    }
+                    if (Array.isArray(node)) { node.forEach((x, i) => this._validate(x, `${loc}[${i}]`, depth + 1)); return; }
+                    const op = templateOp(node);
+                    if (op === null) { for (const k of Object.keys(node)) this._validate(node[k], `${loc}.${k}`, depth + 1); return; }
+                    const arg = node[op], nxt = depth + 1, here = `${loc}.${op}`;
+                    const get = k => (has(node, k) ? node[k] : null);
+                    if (op === 'repeat') {
+                        this._validatePath(arg, here);
+                        const segs = cleanPath(arg).split(this.separator);
+                        if (segs[segs.length - 1] !== '*' || segs.length < 2) throw this._err(here, `repeat pattern must end with '${this.separator}*' (got ${pyStrRepr(arg)}).`);
+                        this._validate(has(node, 'item') ? node.item : {}, `${loc}.item`, nxt);
+                        if (has(node, 'where')) this._validateCond(node.where, `${loc}.where`, nxt);
+                    } else if (op === 'if') {
+                        if (Array.isArray(arg)) {
+                            this._validateBranches(arg, here, nxt);
+                            if (has(node, 'then')) throw this._err(loc, "use 'then' inside each branch of a list 'if'.");
+                        } else { this._validateCond(arg, here, nxt); this._validate(get('then'), `${loc}.then`, nxt); }
+                        this._validate(get('else'), `${loc}.else`, nxt);
+                    } else if (op === 'case') {
+                        if (Array.isArray(arg)) {
+                            this._validateBranches(arg, here, nxt);
+                            if (has(node, 'when')) throw this._err(loc, "a list 'case' takes its branches inline; drop 'when'.");
+                        } else {
+                            this._validate(arg, here, nxt);
+                            const when = get('when');
+                            if (!isMap(when)) throw this._err(loc, "'case' needs a list of {when, then} branches or a 'when' object.");
+                            for (const k of Object.keys(when)) this._validate(when[k], `${loc}.when.${k}`, nxt);
+                        }
+                        this._validate(get('default'), `${loc}.default`, nxt);
+                    } else if (op === 'concat' || op === 'coalesce') {
+                        if (!Array.isArray(arg)) throw this._err(here, 'needs a list.');
+                        arg.forEach((x, i) => this._validate(x, `${here}[${i}]`, nxt));
+                        if (has(node, 'sep') && typeof node.sep !== 'string') throw this._err(loc, "'sep' must be a string.");
+                    } else if (op === 'template') {
+                        if (typeof arg !== 'string') throw this._err(here, 'needs a string.');
+                        for (const m of arg.matchAll(PH_RE())) if (m[1] !== undefined) this._validatePath(m[1], here);
+                    } else if (op === 'path') {
+                        this._validatePath(arg, here);
+                        this._validate(get('default'), `${loc}.default`, nxt);
+                    } else if (op === 'literal') { /* any value */ }
+                    else {
+                        this._validate(arg, here, nxt);
+                        if (op === 'number') this._validate(get('default'), `${loc}.default`, nxt);
+                        if (op === 'replace' && (typeof node.old !== 'string' || !node.old)) throw this._err(loc, "'replace' needs a non-empty 'old' string.");
+                        if (op === 'replace' && has(node, 'new') && typeof node.new !== 'string') throw this._err(loc, "'replace' needs a string 'new'.");
+                        if (op === 'substr') for (const k of ['start', 'end']) if (!isIntArg(node[k])) throw this._err(loc, `'substr' ${k} must be an integer.`);
+                    }
+                }
+                _validateBranches(branches, loc, depth) {
+                    if (!branches.length) throw this._err(loc, 'branch list is empty.');
+                    branches.forEach((br, i) => {
+                        if (!isMap(br) || Object.keys(br).length !== 2 || !has(br, 'when') || !has(br, 'then')) throw this._err(`${loc}[${i}]`, "each branch must be {'when': condition, 'then': value}.");
+                        this._validateCond(br.when, `${loc}[${i}].when`, depth + 1);
+                        this._validate(br.then, `${loc}[${i}].then`, depth + 1);
+                    });
+                }
+                _validateCond(cond, loc, depth) {
+                    if (depth > MAX_TEMPLATE_DEPTH) throw this._err(loc, `condition nesting deeper than ${MAX_TEMPLATE_DEPTH}.`);
+                    if (typeof cond === 'boolean') return;
+                    if (typeof cond === 'string') { this._validatePath(cond, loc); return; }
+                    if (!isMap(cond)) throw this._err(loc, 'a condition must be an object, a path string, or a boolean.');
+                    for (const combo of ['all', 'any', 'and', 'or']) {
+                        if (has(cond, combo)) {
+                            if (Object.keys(cond).length !== 1 || !Array.isArray(cond[combo])) throw this._err(loc, `'${combo}' needs a list of conditions only.`);
+                            cond[combo].forEach((c, i) => this._validateCond(c, `${loc}.${combo}[${i}]`, depth + 1));
+                            return;
+                        }
+                    }
+                    if (has(cond, 'not')) {
+                        if (Object.keys(cond).length !== 1) throw this._err(loc, "'not' takes a single condition.");
+                        this._validateCond(cond.not, `${loc}.not`, depth + 1); return;
+                    }
+                    if (has(cond, 'path') || has(cond, 'expr')) {
+                        const unknown = Object.keys(cond).filter(k => !COND_KEYS.has(k)).sort(cpCmp);
+                        if (unknown.length) throw this._err(loc, `unknown condition keys: ${unknown.join(', ')}.`);
+                        if (has(cond, 'path')) this._validatePath(cond.path, `${loc}.path`);
+                        else this._validate(cond.expr, `${loc}.expr`, depth + 1);
+                        let op;
+                        try { op = normalizeOp(has(cond, 'op') ? cond.op : (has(cond, 'value') ? 'eq' : 'not_empty')); }
+                        catch (e) { throw this._err(loc, e.message); }
+                        if (!UNARY_OPS.has(op) && !has(cond, 'value')) throw this._err(loc, `operator '${op}' needs a 'value'.`);
+                        if ((op === 'in' || op === 'not_in') && !Array.isArray(cond.value)) throw this._err(loc, `operator '${op}' needs a list 'value'.`);
+                        return;
+                    }
+                    const ops = Object.keys(cond).filter(k => k !== 'ignore_case');
+                    if (ops.length !== 1) throw this._err(loc, `expected one operator such as {'eq': ['Path', 'value']}, got ${pyRepr(sortedKeys(cond))}.`);
+                    const raw = ops[0];
+                    const op = alias(raw);
+                    if (!OPS.has(op)) throw this._err(loc, `unknown operator '${raw}'.`);
+                    let args = cond[raw];
+                    args = Array.isArray(args) ? args : [args];
+                    if (!args.length) throw this._err(loc, `'${raw}' needs at least a path.`);
+                    const left = args[0];
+                    if (isMap(left)) this._validate(left, `${loc}.${raw}[0]`, depth + 1);
+                    else this._validatePath(left, `${loc}.${raw}[0]`);
+                    if (UNARY_OPS.has(op)) { if (args.length > 1) throw this._err(loc, `'${raw}' takes only a path.`); }
+                    else if (args.length !== 2) throw this._err(loc, `'${raw}' needs [path, value].`);
+                    if (has(cond, 'ignore_case') && typeof cond.ignore_case !== 'boolean') throw this._err(loc, "'ignore_case' must be true or false.");
+                }
+                // --- evaluation ---
+                _bind(path, bindings) {
+                    let i = 0, unbound = false; const out = [];
+                    for (const seg of path.split(this.separator)) {
+                        if (seg === '*') {
+                            if (i >= bindings.length) { out.push('*'); unbound = true; continue; }
+                            const v = bindings[i++];
+                            if (v !== null) out.push(v);
+                        } else out.push(seg);
+                    }
+                    return [out.join(this.separator), unbound];
+                }
+                _lookup(rec, key) {
+                    if (has(rec, key)) return [true, rec[key]];
+                    const alt = `${key}${this.separator}#text`;
+                    if (has(rec, alt)) return [true, rec[alt]];
+                    return [false, null];
+                }
+                _lookupWild(rec, key) {
+                    const sep = reEsc(this.separator);
+                    let rx = '';
+                    key.split(this.separator).forEach((seg, i) => { rx += seg === '*' ? `(?:${sep}(\\d+))?` : (i ? sep : '') + reEsc(seg); });
+                    const pattern = new RegExp(`^${rx}(?:${sep}#text)?$`);
+                    let best = null;
+                    for (const k of Object.keys(rec)) {
+                        const m = pattern.exec(k);
+                        if (!m) continue;
+                        const order = m.slice(1).map(g => (g === undefined ? -1 : parseInt(g, 10)));
+                        if (best === null || lessThan(order, best[0])) best = [order, k];
+                    }
+                    return best === null ? [false, null] : [true, rec[best[1]]];
+                }
+                _resolve(rawPath, ctx) {
+                    const path = cleanPath(rawPath);
+                    const sep = this.separator;
+                    const first = path.split(sep)[0];
+                    const rec = ctx.record;
+                    if (ctx.roots.has(first) || !ctx.frames.length) {
+                        const [key, unbound] = this._bind(path, ctx.frames.map(f => f.binding));
+                        return unbound ? this._lookupWild(rec, key) : this._lookup(rec, key);
+                    }
+                    for (let i = ctx.frames.length - 1; i >= 0; i--) {
+                        const inner = ctx.frames.slice(i + 1).map(f => f.binding);
+                        const [key, unbound] = this._bind(`${ctx.frames[i].prefix}${sep}${path}`, inner);
+                        const found = unbound ? this._lookupWild(rec, key) : this._lookup(rec, key);
+                        if (found[0]) return found;
+                    }
+                    return [false, null];
+                }
+                _value(rawPath, ctx) { const [f, v] = this._resolve(rawPath, ctx); return f && v !== null ? v : this.missing; }
+                _template(text, ctx) {
+                    return text.replace(PH_RE(), (m0, g1) => {
+                        if (m0 === '{{') return '{';
+                        if (m0 === '}}') return '}';
+                        const [f, v] = this._resolve(g1, ctx);
+                        return f ? toText(v) : '';
+                    });
+                }
+                _rows(head, rec) {
+                    const sep = this.separator;
+                    const rx = new RegExp(`^${reEsc(head)}${reEsc(sep)}(\\d+)(?:${reEsc(sep)}|$)`);
+                    const idx = new Set();
+                    for (const k of Object.keys(rec)) { const m = rx.exec(k); if (m) idx.add(parseInt(m[1], 10)); }
+                    if (idx.size) return Array.from(idx).sort((a, b) => a - b).map(i => ({ prefix: `${head}${sep}${i}`, binding: String(i) }));
+                    if (Object.keys(rec).some(k => k === head || k.startsWith(head + sep))) return [{ prefix: head, binding: null }];
+                    return [];
+                }
+                _repeat(node, ctx) {
+                    const sep = this.separator;
+                    const pattern = cleanPath(node.repeat);
+                    const headPattern = pattern.slice(0, pattern.length - (sep + '*').length);
+                    const first = headPattern.split(sep)[0];
+                    let rows = [];
+                    if (ctx.roots.has(first) || !ctx.frames.length) {
+                        const [head, unbound] = this._bind(headPattern, ctx.frames.map(f => f.binding));
+                        if (!unbound) rows = this._rows(head, ctx.record);
+                    } else {
+                        for (let i = ctx.frames.length - 1; i >= 0; i--) {
+                            const inner = ctx.frames.slice(i + 1).map(f => f.binding);
+                            const [head, unbound] = this._bind(`${ctx.frames[i].prefix}${sep}${headPattern}`, inner);
+                            if (!unbound) { rows = this._rows(head, ctx.record); if (rows.length) break; }
+                        }
+                    }
+                    const item = has(node, 'item') ? node.item : {};
+                    const out = [];
+                    for (const frame of rows) {
+                        const rc = { record: ctx.record, roots: ctx.roots, frames: ctx.frames.concat([frame]) };
+                        if (has(node, 'where') && !this._cond(node.where, rc)) continue;
+                        out.push(this._eval(item, rc));
+                    }
+                    return out;
+                }
+                _eval(node, ctx) {
+                    if (node === null || node === undefined || typeof node === 'boolean' || isNum(node)) return node === undefined ? null : node;
+                    if (typeof node === 'string') {
+                        if (PH_RE().test(node)) return this._template(node, ctx);
+                        if (!strip(node)) return node;
+                        return this._value(node, ctx);
+                    }
+                    if (Array.isArray(node)) return node.map(x => this._eval(x, ctx));
+                    const op = templateOp(node);
+                    if (op === null) { const o = {}; for (const k of Object.keys(node)) put(o, k, this._eval(node[k], ctx)); return o; }
+                    const arg = node[op];
+                    const getOr = (k, d) => (has(node, k) ? node[k] : d);
+                    if (op === 'repeat') return this._repeat(node, ctx);
+                    if (op === 'literal') return arg;
+                    if (op === 'template') return this._template(arg, ctx);
+                    if (op === 'path') {
+                        const [f, v] = this._resolve(arg, ctx);
+                        if ((!f || v === null) && has(node, 'default')) return this._arg(node.default, ctx);
+                        return f && v !== null ? v : this.missing;
+                    }
+                    if (op === 'if') {
+                        if (Array.isArray(arg)) { for (const br of arg) if (this._cond(br.when, ctx)) return this._arg(br.then, ctx); return this._arg(getOr('else', this.missing), ctx); }
+                        return this._arg(getOr(this._cond(arg, ctx) ? 'then' : 'else', this.missing), ctx);
+                    }
+                    if (op === 'case') {
+                        if (Array.isArray(arg)) { for (const br of arg) if (this._cond(br.when, ctx)) return this._arg(br.then, ctx); return this._arg(getOr('default', this.missing), ctx); }
+                        const subject = strip(toText(this._eval(arg, ctx)));
+                        const ic = getOr('ignore_case', false);
+                        for (const k of Object.keys(node.when)) {
+                            if (ic ? lower(strip(k)) === lower(subject) : strip(k) === subject) return this._arg(node.when[k], ctx);
+                        }
+                        return this._arg(getOr('default', this.missing), ctx);
+                    }
+                    if (op === 'concat') {
+                        let parts = arg.map(x => this._arg(x, ctx));
+                        if (getOr('skip_empty', true)) parts = parts.filter(p => !isEmpty(p));
+                        return parts.map(toText).join(getOr('sep', ''));
+                    }
+                    if (op === 'coalesce') { for (const x of arg) { const v = this._arg(x, ctx); if (!isEmpty(v)) return v; } return this.missing; }
+                    const val = this._eval(arg, ctx);
+                    if (op === 'number') {
+                        const num = toNumber(val);
+                        if (num === null) return this._arg(getOr('default', this.missing), ctx);
+                        return num;
+                    }
+                    if (val === null) return null;
+                    const text = toText(val);
+                    if (op === 'upper') return upper(text);
+                    if (op === 'lower') return lower(text);
+                    if (op === 'trim') return strip(text);
+                    if (op === 'replace') return text.split(node.old).join(getOr('new', ''));
+                    return pySlice(text, node.start, node.end);
+                }
+                // Operator arguments and results: a plain string is a path when the
+                // field exists or it looks like one (_ @ # *); otherwise literal text.
+                _arg(node, ctx) {
+                    if (typeof node === 'string' && strip(node) && !node.startsWith('$') && !PH_RE().test(node)) {
+                        const [f, v] = this._resolve(node, ctx);
+                        if (f) return v === null ? this.missing : v;
+                        if (node.includes(this.separator) || /[@#*]/.test(node)) return this.missing;
+                        return node;
+                    }
+                    return this._eval(node, ctx);
+                }
+                _operand(node, ctx) {
+                    if (typeof node === 'string') {
+                        if (node.startsWith('$$')) return node.slice(1);
+                        if (node.startsWith('$')) return this._resolve(node, ctx)[1];
+                        return node;
+                    }
+                    if (isMap(node)) return this._eval(node, ctx);
+                    return node === undefined ? null : node;
+                }
+                _cond(cond, ctx) {
+                    if (typeof cond === 'boolean') return cond;
+                    if (typeof cond === 'string') return !isEmpty(this._resolve(cond, ctx)[1]);
+                    for (const c of ['all', 'and']) if (has(cond, c)) return cond[c].every(x => this._cond(x, ctx));
+                    for (const c of ['any', 'or']) if (has(cond, c)) return cond[c].some(x => this._cond(x, ctx));
+                    if (has(cond, 'not')) return !this._cond(cond.not, ctx);
+                    const ic = has(cond, 'ignore_case') ? cond.ignore_case : false;
+                    let exists, left, op, rawRight;
+                    if (has(cond, 'path') || has(cond, 'expr')) {
+                        if (has(cond, 'path')) [exists, left] = this._resolve(cond.path, ctx);
+                        else { left = this._eval(cond.expr, ctx); exists = left !== null; }
+                        op = normalizeOp(has(cond, 'op') ? cond.op : (has(cond, 'value') ? 'eq' : 'not_empty'));
+                        rawRight = has(cond, 'value') ? cond.value : null;
+                    } else {
+                        const raw = Object.keys(cond).find(k => k !== 'ignore_case');
+                        op = normalizeOp(raw);
+                        const args = Array.isArray(cond[raw]) ? cond[raw] : [cond[raw]];
+                        if (isMap(args[0])) { left = this._eval(args[0], ctx); exists = left !== null; }
+                        else [exists, left] = this._resolve(args[0], ctx);
+                        rawRight = args.length > 1 ? args[1] : null;
+                    }
+                    if (UNARY_OPS.has(op)) return compare(op, left, exists, null, ic);
+                    if (op === 'in' || op === 'not_in') {
+                        const options = Array.isArray(rawRight) ? rawRight : [rawRight];
+                        return compare(op, left, exists, options.map(o => this._operand(o, ctx)), ic);
+                    }
+                    return compare(op, left, exists, this._operand(rawRight, ctx), ic);
+                }
+            }
 
-def g(rec, key):
-    if not key:
-        return ""
-    for k in (key, key + "_#text"):
-        v = rec.get(k)
-        if v not in (None, ""):
-            return str(v).strip()
-    return ""
+            function bodToData(xml, rules, verb = null, { single = false, includeHeader = true, missing = null, kind = 'auto', separator = '_' } = {}) {
+                const m = rules instanceof Mapper ? rules : new Mapper(rules, { kind, missing, separator });
+                return m.toData(xml, verb, { single, includeHeader });
+            }
+            // json.dumps(ensure_ascii=False) formatting, including Infinity/NaN and Python float text.
+            function pyJsonDumps(v, indent = null, level = 0) {
+                const nl = indent ? '\n' + ' '.repeat(indent * (level + 1)) : '';
+                const end = indent ? '\n' + ' '.repeat(indent * level) : '';
+                const sep = indent ? ',' : ', ';
+                if (v === null || v === undefined) return 'null';
+                if (v === true) return 'true';
+                if (v === false) return 'false';
+                if (isNum(v)) return Number.isNaN(v) ? 'NaN' : !Number.isFinite(v) ? (v > 0 ? 'Infinity' : '-Infinity') : numText(v);
+                if (typeof v === 'string') return JSON.stringify(v);
+                if (Array.isArray(v)) return v.length ? '[' + nl + v.map(x => pyJsonDumps(x, indent, level + 1)).join(sep + nl) + end + ']' : '[]';
+                const ks = Object.keys(v);
+                return ks.length ? '{' + nl + ks.map(k => JSON.stringify(k) + ': ' + pyJsonDumps(v[k], indent, level + 1)).join(sep + nl) + end + '}' : '{}';
+            }
+            function bodToJson(xml, rules, verb = null, opts = {}) {
+                return pyJsonDumps(bodToData(xml, rules, verb, opts), opts.indent || null);
+            }
 
-def expand(rec, key, prefix):
-    if "*" not in str(key):
-        return g(rec, key)
-    head, tail = key.split("*", 1)
-    if prefix:
-        return g(rec, prefix + tail)
-    hits = []
-    i = 0
-    while i < 200:
-        cand = head + str(i) + tail
-        if g(rec, cand):
-            hits.append(cand)
-            i += 1
-            continue
-        break
-    return g(rec, hits[0]) if hits else g(rec, head[:-1] + tail)
+            // ---------- json_to_bod (reverse) ----------
+            const NAME_RE = /^[\p{L}\p{Nl}_][\p{L}\p{N}\p{Mn}\p{Mc}_.\-]*$/u;
+            const BAD_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]|[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/;
+            const INFOR_OAGIS_NS = 'http://schema.infor.com/InforOAGIS/2';
+            function checkName(name, kind) { if (typeof name !== 'string' || !NAME_RE.test(name)) throw new BODStructureError(`Invalid XML ${kind} name: ${pyRepr(name)}.`); }
+            function scalarText(v) {
+                if (v === null || v === undefined) return null;
+                let t;
+                if (typeof v === 'boolean') t = v ? 'true' : 'false';
+                else if (isNum(v) || typeof v === 'string') t = toText(v);
+                else throw new BODStructureError(`Unsupported value type ${Array.isArray(v) ? 'list' : 'dict'}.`);
+                if (BAD_CHARS_RE.test(t)) throw new BODStructureError('Value contains characters that are not allowed in XML 1.0.');
+                return t;
+            }
+            const escText = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#13;');
+            const escAttr = s => escText(s).replace(/"/g, '&quot;').replace(/\n/g, '&#10;').replace(/\t/g, '&#9;');
+            class XNode {
+                constructor(tag) { this.tag = tag; this.attrs = new Map(); this.text = null; this.children = new Map(); }
+                child(tag, idx = 0) {
+                    checkName(tag, 'element');
+                    if (!this.children.has(tag)) this.children.set(tag, new Map());
+                    const g = this.children.get(tag);
+                    if (!g.has(idx)) g.set(idx, new XNode(tag));
+                    return g.get(idx);
+                }
+                ordered() { const out = []; for (const g of this.children.values()) Array.from(g.keys()).sort((a, b) => a - b).forEach(i => out.push(g.get(i))); return out; }
+            }
+            class Builder {
+                constructor(sep, maxDepth) { this.sep = sep; this.maxDepth = maxDepth; }
+                putFlat(container, key, value) {
+                    if (typeof key !== 'string' || !key) throw new BODStructureError('Record keys must be non-empty strings.');
+                    const segs = key.split(this.sep);
+                    if (segs.length > this.maxDepth) throw new BODStructureError(`Key '${key}' is deeper than ${this.maxDepth} levels.`);
+                    let node = container, i = 0;
+                    while (i < segs.length) {
+                        const seg = segs[i];
+                        if (seg.startsWith('@')) {
+                            if (node === container) throw new BODStructureError(`Key '${key}': attribute without an element.`);
+                            const name = segs.slice(i).join(this.sep).slice(1);
+                            checkName(name, 'attribute');
+                            const t = this.valueText(value, key);
+                            if (t !== null) node.attrs.set(name, t);
+                            return;
+                        }
+                        if (seg === '#text') {
+                            if (node === container || i !== segs.length - 1) throw new BODStructureError(`Key '${key}': misplaced '#text'.`);
+                            node.text = this.valueText(value, key);
+                            return;
+                        }
+                        if (/^\d+$/.test(seg)) throw new BODStructureError(`Key '${key}': index '${seg}' has no element name.`);
+                        let idx = 0, step = 1;
+                        if (i + 1 < segs.length && /^\d+$/.test(segs[i + 1])) { idx = parseInt(segs[i + 1], 10); step = 2; }
+                        node = node.child(seg, idx);
+                        i += step;
+                    }
+                    this.fill(node, value, 1);
+                }
+                valueText(v, key) { if (v !== null && typeof v === 'object') throw new BODStructureError(`Key '${key}': attributes and text must be scalars.`); return scalarText(v); }
+                fill(node, value, depth) {
+                    if (depth > this.maxDepth) throw new BODStructureError(`Input nesting exceeds ${this.maxDepth} levels.`);
+                    if (isMap(value)) { for (const k of Object.keys(value)) this.putNested(node, k, value[k], depth + 1); }
+                    else if (Array.isArray(value)) throw new BODStructureError(`Element '${node.tag}': unexpected nested list.`);
+                    else node.text = scalarText(value);
+                }
+                putNested(node, key, value, depth) {
+                    if (typeof key !== 'string' || !key) throw new BODStructureError('Object keys must be non-empty strings.');
+                    if (key.startsWith('@')) { checkName(key.slice(1), 'attribute'); const t = this.valueText(value, key); if (t !== null) node.attrs.set(key.slice(1), t); return; }
+                    if (key === '#text') { node.text = this.valueText(value, key); return; }
+                    if (Array.isArray(value)) {
+                        const g = node.children.get(key);
+                        const start = g && g.size ? Math.max(...g.keys()) + 1 : 0;
+                        value.forEach((item, off) => this.fill(node.child(key, start + off), item, depth + 1));
+                        if (!value.length) node.child(key, start);
+                        return;
+                    }
+                    this.fill(node.child(key, 0), value, depth + 1);
+                }
+                serialize(node, pretty, ns) { const lines = []; this.write(node, 0, lines, pretty, ns); return lines.join(pretty ? '\n' : ''); }
+                write(node, level, lines, pretty, ns) {
+                    const pad = pretty ? '  '.repeat(level) : '';
+                    let attrs = ns ? ` xmlns="${escAttr(ns)}"` : '';
+                    for (const [k, v] of node.attrs) attrs += ` ${k}="${escAttr(v)}"`;
+                    const kids = node.ordered();
+                    if (!kids.length) {
+                        lines.push(node.text === null ? `${pad}<${node.tag}${attrs}/>` : `${pad}<${node.tag}${attrs}>${escText(node.text)}</${node.tag}>`);
+                        return;
+                    }
+                    lines.push(`${pad}<${node.tag}${attrs}>${node.text !== null ? escText(node.text) : ''}`);
+                    kids.forEach(c => this.write(c, level + 1, lines, pretty, null));
+                    lines.push(`${pad}</${node.tag}>`);
+                }
+            }
+            const isFlatRecord = r => Object.values(r).every(v => v === null || typeof v !== 'object');
+            function flattenNested(obj, sep, maxDepth, prefix = '', depth = 0) {
+                if (depth > maxDepth) throw new BODStructureError(`Input nesting exceeds ${maxDepth} levels.`);
+                const out = newRec();
+                const merge = src => { for (const k of Object.keys(src)) put(out, k, src[k]); };
+                for (const k of Object.keys(obj)) {
+                    const v = obj[k];
+                    const key = prefix ? `${prefix}${sep}${k}` : String(k);
+                    if (isMap(v)) merge(flattenNested(v, sep, maxDepth, key, depth + 1));
+                    else if (Array.isArray(v)) v.forEach((item, i) => {
+                        const ik = `${key}${sep}${i}`;
+                        if (isMap(item)) merge(flattenNested(item, sep, maxDepth, ik, depth + 1));
+                        else if (Array.isArray(item)) throw new BODStructureError(`'${key}': nested lists are not supported.`);
+                        else put(out, ik, item);
+                    });
+                    else put(out, key, v);
+                }
+                return out;
+            }
+            function loadRecords(data) {
+                let obj = data;
+                if (typeof data === 'string') {
+                    const text = strip(data).replace(/^\uFEFF/, '');
+                    if (!text) throw new BODParseError('Input JSON is empty.');
+                    try { obj = JSON.parse(text); }
+                    catch (e) {
+                        try { obj = text.split(/\r\n|\r|\n/).filter(l => strip(l)).map(l => JSON.parse(l)); }
+                        catch (e2) { throw new BODParseError('Input is neither JSON nor NDJSON: ' + e2.message); }
+                    }
+                }
+                let records;
+                if (isMap(obj)) {
+                    if (Object.keys(obj).length === 2 && has(obj, 'status') && has(obj, 'message') && obj.status === 'error') throw new BODStructureError(`Input is an error object: ${obj.message}`);
+                    records = [obj];
+                } else if (Array.isArray(obj)) records = obj;
+                else throw new BODStructureError('Input must be a JSON object, an array of objects, or NDJSON.');
+                if (!records.length) throw new BODStructureError('Input contains no records.');
+                for (const r of records) if (!isMap(r)) throw new BODStructureError('Every record must be a JSON object.');
+                return records.map(r => { const c = newRec(); for (const k of Object.keys(r)) put(c, k, r[k]); return c; });
+            }
+            // jsonToBod(data, verb, noun, {rules, separator, namespace, root, releaseId, versionId,
+            //   applicationArea, includeApplicationArea, actionCode, flat, pretty, xmlDeclaration})
+            function jsonToBod(data, verb = 'Sync', noun = null, o = {}) {
+                const opt = (k, d) => (has(o, k) && o[k] !== undefined ? o[k] : d);
+                const sep = opt('separator', '_');
+                if (!sep) throw new BODStructureError('Separator must be a non-empty string.');
+                const maxDepth = opt('maxDepth', 256);
+                checkName(verb, 'verb');
+                if (noun !== null) checkName(noun, 'noun');
+                if (opt('root', null) !== null) checkName(o.root, 'root');
+                const records = loadRecords(data);
+                const compiled = opt('rules', null) !== null ? compileRules(o.rules, sep, 'only') : null;
+                const b = new Builder(sep, maxDepth);
+                const specials = new Set(['ApplicationArea', verb]);
+                let appNode = null, verbNode = null; const nouns = [];
+                for (let record of records) {
+                    let flat = opt('flat', null) === null ? isFlatRecord(record) : o.flat;
+                    if (compiled) { if (!flat) record = flattenNested(record, sep, maxDepth); record = compiled.apply(record); flat = true; }
+                    const container = new XNode('#record');
+                    for (let key of Object.keys(record)) {
+                        const value = record[key];
+                        if (flat) {
+                            const first = key.split(sep)[0];
+                            if (noun !== null && !specials.has(first) && first !== noun) key = `${noun}${sep}${key}`;
+                            b.putFlat(container, key, value);
+                        } else if (noun !== null && !specials.has(key) && key !== noun) b.putNested(container.child(noun, 0), key, value, 1);
+                        else b.putNested(container, key, value, 1);
+                    }
+                    for (const c of container.ordered()) {
+                        if (c.tag === 'ApplicationArea') appNode = appNode || c;
+                        else if (c.tag === verb) verbNode = verbNode || c;
+                        else nouns.push(c);
+                    }
+                }
+                if (!nouns.length) throw new BODStructureError('No noun data found in the input.');
+                const appData = opt('applicationArea', null);
+                if (appData && Object.keys(appData).length) {
+                    appNode = appNode || new XNode('ApplicationArea');
+                    const holder = new XNode('#app');
+                    holder.children.set('ApplicationArea', new Map([[0, appNode]]));
+                    if (isFlatRecord(appData)) {
+                        for (const k of Object.keys(appData)) b.putFlat(holder, k.startsWith('ApplicationArea') ? k : `ApplicationArea${sep}${k}`, appData[k]);
+                    } else b.fill(appNode, has(appData, 'ApplicationArea') ? appData.ApplicationArea : appData, 1);
+                }
+                if (!appNode && opt('includeApplicationArea', true)) {
+                    appNode = new XNode('ApplicationArea');
+                    appNode.child('CreationDateTime').text = (opt('now', null) || new Date()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+                }
+                verbNode = verbNode || new XNode(verb);
+                const actionCode = opt('actionCode', null);
+                if (actionCode !== null) {
+                    const expr = verbNode.child('ActionCriteria').child('ActionExpression');
+                    if (!expr.attrs.has('actionCode')) { const t = scalarText(actionCode); if (t !== null) expr.attrs.set('actionCode', t); }
+                }
+                const root = new XNode(opt('root', null) || `${verb}${nouns[0].tag}`);
+                checkName(root.tag, 'root');
+                const releaseId = opt('releaseId', '9.2'), versionId = opt('versionId', null);
+                if (releaseId !== null) root.attrs.set('releaseID', scalarText(releaseId) || '');
+                if (versionId !== null) root.attrs.set('versionID', scalarText(versionId) || '');
+                if (appNode) root.children.set('ApplicationArea', new Map([[0, appNode]]));
+                const da = root.child('DataArea');
+                da.children.set(verb, new Map([[0, verbNode]]));
+                const seen = {};
+                for (const n of nouns) {
+                    const idx = seen[n.tag] || 0;
+                    if (!da.children.has(n.tag)) da.children.set(n.tag, new Map());
+                    da.children.get(n.tag).set(idx, n);
+                    seen[n.tag] = idx + 1;
+                }
+                const pretty = opt('pretty', true);
+                const ns = has(o, 'namespace') ? o.namespace : INFOR_OAGIS_NS;
+                const nl = pretty ? '\n' : '';
+                return (opt('xmlDeclaration', true) ? '<?xml version="1.0" encoding="UTF-8"?>' + nl : '') + b.serialize(root, pretty, ns) + nl;
+            }
 
-def cond(rec, c, prefix):
-    if not isinstance(c, dict):
-        return bool(c)
-    for op, args in c.items():
-        if op in ("all", "any", "not"):
-            vals = [cond(rec, x, prefix) for x in (args if isinstance(args, list) else [args])]
-            return all(vals) if op == "all" else any(vals) if op == "any" else not vals[0]
-        left = expand(rec, str(args[0]).strip("{}"), prefix)
-        right = str(args[1] if len(args) > 1 else "")
-        if op == "eq": return left == right
-        if op == "ne": return left != right
-        if op == "gt": return float(left or 0) > float(right or 0)
-        if op == "ge": return float(left or 0) >= float(right or 0)
-        if op == "lt": return float(left or 0) < float(right or 0)
-        if op == "le": return float(left or 0) <= float(right or 0)
-        if op == "in": return left in (args[1] if isinstance(args[1], list) else [args[1]])
-        if op == "not_in": return left not in (args[1] if isinstance(args[1], list) else [args[1]])
-        if op == "contains": return right in left
-        if op == "starts_with": return left.startswith(right)
-        if op == "ends_with": return left.endswith(right)
-        if op == "exists": return bool(left)
-        if op == "missing": return not left
-        if op == "empty": return left == ""
-        if op == "not_empty": return left != ""
-    return False
+            return { VERSION, BODTransformError, BODParseError, BODStructureError, Mapper, TransformRules, compileRules, toRecords, detectVerb, bodToData, bodToJson, isTemplateRules, jsonToBod, pyRepr, pyJsonDumps };
+        })();
+        /*BODTOJSON_JS_END*/
 
-def apply(rec, rules, prefix=""):
-    if isinstance(rules, str):
-        if "{" in rules and "}" in rules:
-            import re
-            return re.sub(r"\\{([^}]+)\\}", lambda m: expand(rec, m.group(1), prefix), rules)
-        return expand(rec, rules, prefix) if rules else ""
-    if isinstance(rules, bool) or rules is None or isinstance(rules, (int, float)):
-        return rules
-    if isinstance(rules, list):
-        return [apply(rec, x, prefix) for x in rules]
-    if isinstance(rules, dict):
-        if "repeat" in rules:
-            head = rules["repeat"].split("*")[0]
-            rows = []
-            i = 0
-            while i < 200:
-                pfx = head + str(i)
-                if any(k == pfx or str(k).startswith(pfx + "_") for k in rec):
-                    rows.append(apply(rec, rules.get("item", {}), pfx))
-                    i += 1
-                    continue
-                break
-            if not rows and prefix:
-                rows.append(apply(rec, rules.get("item", {}), prefix))
-            return rows
-        if "case" in rules:
-            for br in rules["case"]:
-                if cond(rec, br.get("when"), prefix):
-                    return apply(rec, br.get("then"), prefix)
-            return apply(rec, rules.get("default", ""), prefix)
-        if "if" in rules:
-            return apply(rec, rules.get("then") if cond(rec, rules["if"], prefix) else rules.get("else", ""), prefix)
-        if "concat" in rules:
-            return "".join(str(apply(rec, x, prefix) or "") for x in rules["concat"])
-        if "template" in rules:
-            return apply(rec, rules["template"], prefix)
-        if "coalesce" in rules:
-            for x in rules["coalesce"]:
-                v = apply(rec, x, prefix)
-                if v not in (None, ""):
-                    return v
-            return ""
-        if "upper" in rules: return str(apply(rec, rules["upper"], prefix) or "").upper()
-        if "lower" in rules: return str(apply(rec, rules["lower"], prefix) or "").lower()
-        if "trim" in rules: return str(apply(rec, rules["trim"], prefix) or "").strip()
-        if "number" in rules:
-            try: return float(apply(rec, rules["number"], prefix) or 0)
-            except Exception: return 0
-        out = {}
-        for k, v in rules.items():
-            out[k] = apply(rec, v, prefix)
-        return out
-    return rules
+        /*ION_SIMPLE_PY_START*/
+        // ---------------------------------------------------------------------
+        // BODtoJSON 2.6.0 script generation.
+        // Outbound: the mapper becomes an output template (RULES) and the ION
+        //   script is one call: output_var = bod_to_json(input_var, rules=RULES)
+        // Inbound: the mapper becomes 2.5 flat rules (target BOD path -> value)
+        //   and the ION script is: output_var = json_to_bod(input_var, ..., rules=RULES)
+        // "Execute" / "Simulate" run the RULES in the script textarea through the
+        // in-browser port (BODtoJSONjs), so the preview is what ION will produce.
+        // ---------------------------------------------------------------------
+        const BODTOJSON_VERSION = '2.6.0';
+        let ionMissingMode = 'null';   // 'null' = library default, 'empty' = missing=""
 
-records = to_records(input_var, ${JSON.stringify(verb)}, include_header=True)
-items = [apply(r, RULES) for r in records]
-output_var = json.dumps(items)
+        function setIonMissingMode(v) {
+            ionMissingMode = v === 'empty' ? 'empty' : 'null';
+            updateGenerators();
+            if (document.getElementById('pythonOutput').value) simulatePython();
+        }
+
+        // Python literal for a JSON value (True/False/None), 4-space indent.
+        function toPythonLiteral(v, level = 0) {
+            const pad = '    '.repeat(level + 1), end = '    '.repeat(level);
+            if (v !== null && typeof v === 'object' && level > 0) {
+                const flat = pyInline(v);
+                if (flat.length + pad.length <= 96) return flat;
+            }
+            if (v === null || v === undefined) return 'None';
+            if (v === true) return 'True';
+            if (v === false) return 'False';
+            if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'None';
+            if (typeof v === 'string') return JSON.stringify(v);
+            if (Array.isArray(v)) {
+                if (!v.length) return '[]';
+                if (v.every(x => x !== null && typeof x === 'object' && !Array.isArray(x) && !Object.keys(x).length)) return '[' + v.map(() => '{}').join(', ') + ']';
+                return '[\n' + v.map(x => pad + toPythonLiteral(x, level + 1)).join(',\n') + ',\n' + end + ']';
+            }
+            const keys = Object.keys(v);
+            if (!keys.length) return '{}';
+            return '{\n' + keys.map(k => pad + JSON.stringify(k) + ': ' + toPythonLiteral(v[k], level + 1)).join(',\n') + ',\n' + end + '}';
+        }
+
+        function pyInline(v) {
+            if (v === null || v === undefined) return 'None';
+            if (v === true) return 'True';
+            if (v === false) return 'False';
+            if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'None';
+            if (typeof v === 'string') return JSON.stringify(v);
+            if (Array.isArray(v)) return '[' + v.map(pyInline).join(', ') + ']';
+            return '{' + Object.keys(v).map(k => JSON.stringify(k) + ': ' + pyInline(v[k])).join(', ') + '}';
+        }
+
+        // Python literal text (dict/list/str/number/True/False/None) -> JS value.
+        function parsePythonLiteral(src) {
+            let out = '', i = 0;
+            const n = src.length;
+            const trimComma = () => { out = out.replace(/,\s*$/, m => m.slice(1)); };
+            while (i < n) {
+                const ch = src[i];
+                if (ch === '#') { while (i < n && src[i] !== '\n') i++; continue; }
+                if (ch === '"' || ch === "'") {
+                    if (src.startsWith(ch.repeat(3), i)) throw new Error('triple-quoted strings are not supported in RULES');
+                    let j = i + 1, body = '';
+                    while (j < n && src[j] !== ch) {
+                        if (src[j] === '\n') throw new Error('unterminated string in RULES');
+                        if (src[j] === '\\') {
+                            const nx = src[j + 1];
+                            if (nx === "'") body += "'";
+                            else if (nx === 'x') { body += '\\u00' + src.substr(j + 2, 2); j += 2; }
+                            else body += '\\' + nx;
+                            j += 2; continue;
+                        }
+                        body += (src[j] === '"') ? '\\"' : src[j];
+                        j++;
+                    }
+                    if (j >= n) throw new Error('unterminated string in RULES');
+                    out += '"' + body + '"';
+                    i = j + 1; continue;
+                }
+                if (/[A-Za-z_]/.test(ch)) {
+                    let j = i; while (j < n && /\w/.test(src[j])) j++;
+                    const word = src.slice(i, j);
+                    const map = { True: 'true', False: 'false', None: 'null' };
+                    if (!(word in map)) throw new Error(`unsupported name '${word}' in RULES (use JSON values, True/False/None)`);
+                    out += map[word]; i = j; continue;
+                }
+                if (ch === '}' || ch === ']') trimComma();
+                if (ch === '(' || ch === ')') throw new Error('tuples are not supported in RULES; use [...]');
+                out += ch; i++;
+            }
+            return JSON.parse(out);
+        }
+
+        // Read "RULES = {...}" and the keyword arguments of `call(` from a script.
+        function readIonScript(text, call) {
+            const m = /^RULES\s*=\s*/m.exec(text);
+            if (!m) throw new Error('no "RULES = {...}" assignment found in the script.');
+            let i = m.index + m[0].length;
+            const open = text[i];
+            if (open !== '{' && open !== '[') throw new Error('RULES must be a dict.');
+            let depth = 0, j = i, q = null;
+            for (; j < text.length; j++) {
+                const c = text[j];
+                if (q) { if (c === '\\') { j++; continue; } if (c === q) q = null; continue; }
+                if (c === '#') { while (j < text.length && text[j] !== '\n') j++; continue; }
+                if (c === '"' || c === "'") { q = c; continue; }
+                if (c === '{' || c === '[') depth++;
+                else if (c === '}' || c === ']') { depth--; if (!depth) break; }
+            }
+            if (depth) throw new Error('RULES has unbalanced brackets.');
+            let rules;
+            try { rules = parsePythonLiteral(text.slice(i, j + 1)); }
+            catch (e) { throw new Error('could not read RULES: ' + e.message); }
+            const kwargs = {};
+            const callAt = text.search(new RegExp('\\b' + call + '\\s*\\('));
+            if (callAt < 0) throw new Error(`no ${call}(...) call found in the script.`);
+            const argsStart = text.indexOf('(', callAt) + 1;
+            let k = argsStart, d = 1, qq = null;
+            for (; k < text.length && d; k++) {
+                const c = text[k];
+                if (qq) { if (c === '\\') { k++; continue; } if (c === qq) qq = null; continue; }
+                if (c === '"' || c === "'") qq = c;
+                else if (c === '(' || c === '[' || c === '{') d++;
+                else if (c === ')' || c === ']' || c === '}') d--;
+            }
+            const argText = text.slice(argsStart, k - 1);
+            const kwRe = /(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|True|False|None|-?\d+(?:\.\d+)?|[A-Za-z_]\w*)/g;
+            let km;
+            while ((km = kwRe.exec(argText))) {
+                const raw = km[2];
+                kwargs[km[1]] = raw === 'RULES' ? rules : (/^[A-Za-z_]\w*$/.test(raw) && !['True', 'False', 'None'].includes(raw)) ? raw : parsePythonLiteral(raw);
+            }
+            return { rules, kwargs };
+        }
+
+        // BOD dotted path (Root.DataArea.Noun.A.@b) -> BODtoJSON flattened key (Noun_A_@b)
+        function bodPathToKey(path) {
+            let parts = String(path || '').replace(/[{}]/g, '').trim().split('.').filter(Boolean);
+            if (!parts.length) return '';
+            let attr = '';
+            if (parts[parts.length - 1].charAt(0) === '@') attr = '@' + parts.pop().slice(1).split(':').pop();
+            const da = parts.indexOf('DataArea');
+            const root = (typeof currentBodRootName === 'string') ? currentBodRootName : '';
+            if (da >= 0) parts = parts.slice(da + 1);
+            else if (root && parts[0] === root) parts = parts.slice(1);
+            parts = parts.map(p => p.split(':').pop());
+            return parts.concat(attr ? [attr] : []).join('_');
+        }
+
+        let sampleKeyCache = { xml: null, keys: [] };
+        function sampleFlatKeys() {
+            if (sampleKeyCache.xml === rawBodXmlString) return sampleKeyCache.keys;
+            let keys = [];
+            try {
+                const recs = BODtoJSONjs.toRecords(rawBodXmlString, null, true);
+                const s = new Set(); recs.forEach(r => Object.keys(r).forEach(k => s.add(k)));
+                keys = Array.from(s);
+            } catch (e) { keys = []; }
+            sampleKeyCache = { xml: rawBodXmlString, keys };
+            return keys;
+        }
+        // Does a flattened key (with optional '*' segments) match the sample BOD?
+        function keyInSample(key) {
+            const keys = sampleFlatKeys();
+            if (!key.includes('*')) return keys.some(k => k === key || k === key + '_#text');
+            const rx = new RegExp('^' + key.split('_').map((s, i) => (s === '*' ? '(?:_\\d+)?' : (i ? '_' : '') + s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))).join('') + '(?:_#text)?$');
+            return keys.some(k => rx.test(k));
+        }
+        // Insert '*' after each repeated element of the enclosing arrays (outer -> inner).
+        function starKeyForChain(key, chain) {
+            const segs = String(key).split('_');
+            let pos = 0;
+            for (const tag of chain) {
+                if (!tag) continue;
+                const at = segs.indexOf(tag, pos);
+                if (at < 0) break;
+                if (segs[at + 1] !== '*') segs.splice(at + 1, 0, '*');
+                pos = at + 2;
+            }
+            return segs.join('_');
+        }
+        // Repeat pattern for an array whose repeating XML node is `tag` inside `chain`.
+        function repeatPatternFor(tag, chain) {
+            const keys = (extractedPaths || []).map(p => bodPathToKey(p.path)).concat(sampleFlatKeys());
+            for (const key of keys) {
+                const segs = key.split('_');
+                let pos = 0, ok = true;
+                for (const t of chain) { if (!t) continue; const at = segs.indexOf(t, pos); if (at < 0) { ok = false; break; } pos = at + 1; }
+                if (!ok) continue;
+                const at = segs.indexOf(tag, pos);
+                if (at < 0) continue;
+                const head = segs.slice(0, at + 1).filter(s => !/^\d+$/.test(s)).join('_');
+                return starKeyForChain(head, chain.concat([tag]));
+            }
+            return tag + '_*';
+        }
+
+        // A source reference typed or picked in the mapper -> template path, or null.
+        function toTemplatePath(raw, chain) {
+            const t = String(raw || '').replace(/^\{|\}$/g, '').trim();
+            if (!t || /\s/.test(t)) return null;
+            const sources = (extractedPaths || []).map(p => p.path);
+            if (sources.includes(t) || /^[A-Za-z_][\w:-]*(\.[@A-Za-z_][\w:.-]*)+$/.test(t)) return starKeyForChain(bodPathToKey(t), chain);
+            if (/^[A-Za-z_][\w@#*-]*$/.test(t) && (keyInSample(t) || keyInSample(starKeyForChain(t, chain)))) return starKeyForChain(t, chain);
+            return null;
+        }
+        // Plain text is literal in operator results only when it cannot be read as a path.
+        function literalArg(text, chain) {
+            const s = String(text);
+            const risky = !s.trim() ? false : (s.startsWith('$') || /[{}_@#*]/.test(s) || sampleFlatKeys().some(k => k === s || k.endsWith('_' + s) || k.endsWith('_' + s + '_#text')));
+            return risky ? { literal: s } : s;
+        }
+        const escTemplateText = s => s.replace(/\{/g, '{{').replace(/\}/g, '}}');
+
+        // One mapper value (path, "{a}-{b}" merge, literal, true/false) -> template node.
+        function outboundValue(raw, chain, inArg) {
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return undefined;
+            if (trimmed.toLowerCase() === 'true') return true;
+            if (trimmed.toLowerCase() === 'false') return false;
+            const direct = toTemplatePath(trimmed, chain);
+            if (direct && !(trimmed.includes('{') && !/^\{[^{}]+\}$/.test(trimmed))) {
+                // in then/else/default a bare word without _ @ # * would be literal text
+                return inArg && !/[_@#*]/.test(direct) ? { path: direct } : direct;
+            }
+            if (trimmed.includes('{')) {
+                const tokens = parseExpression(trimmed, (extractedPaths || []).map(p => p.path));
+                const parts = tokens.map(t => {
+                    if (t.type === 'literal') return escTemplateText(t.val);
+                    const p = toTemplatePath(t.val, chain) || starKeyForChain(t.val.trim(), chain);
+                    return '{' + p + '}';
+                });
+                return { template: parts.join('') };
+            }
+            return inArg ? literalArg(trimmed, chain) : { literal: trimmed };
+        }
+        const OUTBOUND_OPS = { '==': 'eq', '!=': 'ne', 'contains': 'contains', 'startsWith': 'starts_with', '>': 'gt', '<': 'lt', 'isEmpty': 'empty', 'notEmpty': 'not_empty' };
+        function compareOperand(val, chain, isApiSide) {
+            const s = String(val ?? '');
+            const m = /^\{([^{}]+)\}$/.exec(s.trim());
+            if (m) return '$' + (isApiSide ? m[1].trim().replace(/\./g, '_') : (toTemplatePath(m[1], chain) || m[1].trim()));
+            return s.startsWith('$') ? '$' + s : s;
+        }
+        function outboundCase(rule, chain) {
+            if (!rule || !rule.branches || !rule.branches.length) return undefined;
+            const branches = rule.branches.map(b => {
+                const op = OUTBOUND_OPS[(b.op || '==').trim()] || 'eq';
+                const left = toTemplatePath(b.field, chain) || starKeyForChain(String(b.field || '').replace(/[{}]/g, '').trim(), chain);
+                const when = (op === 'empty' || op === 'not_empty') ? { [op]: left } : { [op]: [left, compareOperand(b.compareVal, chain, false)] };
+                const then = outboundValue(b.resultVal, chain, true);
+                return { when, then: then === undefined ? '' : then };
+            });
+            const node = { case: branches };
+            const dflt = outboundValue(rule.elseVal, chain, true);
+            if (dflt !== undefined) node.default = dflt;
+            return node;
+        }
+        function setNestedKey(obj, path, val) {
+            const parts = String(path).split('.');
+            let cur = obj;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
+                cur = cur[parts[i]];
+            }
+            cur[parts[parts.length - 1]] = val;
+        }
+        // The outbound mapper as a BODtoJSON 2.6.0 output template.
+        function buildOutboundTemplate(prefix = '', chain = []) {
+            const scope = prefix ? prefix + '[].' : '';
+            const obj = {};
+            const inScope = name => (scope ? name.startsWith(scope) && !name.slice(scope.length).includes('[]') : name && !name.includes('[]'));
+            document.querySelectorAll('#mapperContainer .mapping-input').forEach(inp => {
+                const t = inp.dataset.target || '';
+                if (!inScope(t)) return;
+                const raw = inp.value.trim();
+                const rule = outboundRules[t];
+                const rel = scope ? t.slice(scope.length) : t;
+                const leaf = rel.split('.').pop();
+                let val = outboundCase(rule, chain);
+                if (val === undefined) {
+                    if (raw === '') return;
+                    val = outboundValue(raw, chain, false);
+                    if ((leaf === 'isActive' || leaf === 'usableInPurchase') && val !== undefined) {
+                        if (raw === 'Open') val = true;
+                        else if (typeof val === 'string') val = { if: { eq: [val, 'Open'] }, then: true, else: false };
+                    }
+                }
+                if (val !== undefined) setNestedKey(obj, rel, val);
+            });
+            document.querySelectorAll('#mapperContainer .array-repeat-input').forEach(a => {
+                const name = a.dataset.array || '';
+                if (!inScope(name)) return;
+                const tag = String(a.value || '').trim();
+                const rel = scope ? name.slice(scope.length) : name;
+                const innerChain = tag ? chain.concat([tag]) : chain;
+                const item = buildOutboundTemplate(name, innerChain);
+                setNestedKey(obj, rel, tag ? { repeat: repeatPatternFor(tag, chain), item } : [item]);
+            });
+            return obj;
+        }
+        function buildSimpleIonPython() {
+            const rules = buildOutboundTemplate('', []);
+            const single = !(activeTargetSchema && activeTargetSchema.type === 'array');
+            const args = ['input_var', 'rules=RULES'];
+            if (single) args.push('single=True');
+            if (ionMissingMode === 'empty') args.push('missing=""');
+            const objName = (document.getElementById('objectName') && document.getElementById('objectName').value) || 'payload';
+            return `# Infor ION Scripting: BOD -> ${objName} JSON with BODtoJSON ${BODTOJSON_VERSION}
+# (pip install BODtoJSON==${BODTOJSON_VERSION}). ION supplies input_var (the BOD XML)
+# and reads output_var. RULES is the output template: your JSON with BOD paths.
+from BODtoJSON import bod_to_json
+
+RULES = ${toPythonLiteral(rules)}
+
+output_var = bod_to_json(${args.join(', ')})  # noqa: F821 - input_var is provided by ION
+`;
+        }
+
+        // ---- inbound (API JSON -> BOD) ----
+        function inboundValue(raw) {
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return undefined;
+            const tokens = parseExpression(trimmed, apiProperties);
+            const field = v => v.trim().replace(/\./g, '_');
+            if (tokens.length === 1 && tokens[0].type === 'path') return '$' + field(tokens[0].val);
+            if (tokens.some(t => t.type === 'path')) {
+                return { template: tokens.map(t => (t.type === 'literal' ? escTemplateText(t.val) : '{' + field(t.val) + '}')).join('') };
+            }
+            return trimmed.startsWith('$') ? '$' + trimmed : trimmed;
+        }
+        function buildInboundRules() {
+            const rules = {};
+            document.querySelectorAll('.inbound-mapping-input').forEach(input => {
+                const path = input.dataset.inboundTarget;
+                const key = bodPathToKey(path);
+                if (!key || key in rules) return;
+                const rule = inboundRules[path];
+                let val;
+                if (rule && rule.branches && rule.branches.length) {
+                    const branches = rule.branches.map(b => {
+                        const op = OUTBOUND_OPS[(b.op || '==').trim()] || 'eq';
+                        const cond = { path: String(b.field || '').replace(/[{}]/g, '').trim().replace(/\./g, '_'), op };
+                        if (op !== 'empty' && op !== 'not_empty') cond.value = compareOperand(b.compareVal, [], true);
+                        const then = inboundValue(b.resultVal);
+                        return { when: cond, then: then === undefined ? '' : then };
+                    });
+                    val = { if: branches };
+                    const els = inboundValue(rule.elseVal);
+                    if (els !== undefined) val.else = els;
+                } else {
+                    val = inboundValue(input.value);
+                }
+                if (val !== undefined) rules[key] = val;
+            });
+            return rules;
+        }
+        function inboundEnvelope() {
+            const env = { verb: 'Sync', root: null, releaseId: '9.2', versionId: null };
+            const root = bodXmlDoc && bodXmlDoc.documentElement;
+            if (!root) return env;
+            try { env.verb = BODtoJSONjs.detectVerb(bodXmlDoc); } catch (e) { /* keep Sync */ }
+            const da = Array.from(root.childNodes).find(n => n.nodeType === 1 && getLocalName(n.nodeName) === 'DataArea');
+            const noun = da ? Array.from(da.childNodes).filter(n => n.nodeType === 1)[1] : null;
+            const rootName = getLocalName(root.nodeName);
+            if (!noun || rootName !== env.verb + getLocalName(noun.nodeName)) env.root = rootName;
+            env.releaseId = root.hasAttribute('releaseID') ? root.getAttribute('releaseID') : null;
+            env.versionId = root.hasAttribute('versionID') ? root.getAttribute('versionID') : null;
+            return env;
+        }
+        function buildInboundIonPython() {
+            const rules = buildInboundRules();
+            const env = inboundEnvelope();
+            const args = ['input_var', `verb=${JSON.stringify(env.verb)}`];
+            if (env.root) args.push(`root=${JSON.stringify(env.root)}`);
+            if (env.releaseId !== '9.2') args.push(`release_id=${env.releaseId === null ? 'None' : JSON.stringify(env.releaseId)}`);
+            if (env.versionId !== null) args.push(`version_id=${JSON.stringify(env.versionId)}`);
+            args.push('rules=RULES');
+            const note = Object.keys(rules).length ? '' : '\n# Nothing is mapped yet: map at least one BOD field on the Field Mapping tab.';
+            return `# Infor ION Scripting: API JSON -> OAGIS BOD with BODtoJSON ${BODTOJSON_VERSION}
+# (pip install BODtoJSON==${BODTOJSON_VERSION}). ION supplies input_var (the JSON payload)
+# and reads output_var. RULES maps BOD paths (targets) to JSON fields ("$field").${note}
+from BODtoJSON import json_to_bod
+
+RULES = ${toPythonLiteral(rules)}
+
+output_var = json_to_bod(${args.join(', ')})  # noqa: F821 - input_var is provided by ION
 `;
         }
         /*ION_SIMPLE_PY_END*/
@@ -3488,158 +4737,10 @@ output_var = json.dumps(items)
 
         function updateInboundGenerators() {
             if(!bodXmlDoc) return;
-            
-            let pyCode = `import json
-import xml.etree.ElementTree as ET
-
-`;
-            pyCode += `# ---------------------------------------------------------
-`;
-            pyCode += `# BIZZTEQ INBOUND AGENT: API JSON to Infor OAGIS XML
-`;
-            pyCode += `# ---------------------------------------------------------
-
-`;
-            pyCode += `BASE_XML_TEMPLATE = """${rawBodXmlString.replace(/\\/g, '\\\\').trim()}"""
-
-`;
-            
-            pyCode += `def set_node_value(root_element, path, value):
-`;
-            pyCode += `    """Safely traverses XML by local-name and sets value."""
-`;
-            pyCode += `    parts = path.split('.')
-    current = root_element
-`;
-            pyCode += `    for part in parts:
-`;
-            pyCode += `        if part.startswith('@'):
-`;
-            pyCode += `            current.set(part[1:], str(value))
-            return
-`;
-            pyCode += `        next_node = None
-`;
-            pyCode += `        for child in current:
-`;
-            pyCode += `            if child.tag.split('}')[-1] == part:
-`;
-            pyCode += `                next_node = child
-                break
-`;
-            pyCode += `        if next_node is None:
-            return # Path not found
-`;
-            pyCode += `        current = next_node
-`;
-            pyCode += `    current.text = str(value)
-
-`;
-
-            pyCode += `# input_var contains JSON string from target API
-`;
-            pyCode += `try:
-    data = json.loads(input_var.strip())
-`;
-            pyCode += `    if isinstance(data, list) and len(data) > 0:
-        data = data[0]
-`;
-            pyCode += `except Exception as e:
-    raise ValueError("Invalid API JSON Payload: " + str(e))
-
-`;
-            
-            pyCode += `try:
-    root = ET.fromstring(BASE_XML_TEMPLATE)
-`;
-            pyCode += `except Exception as e:
-    raise ValueError("Template XML Parsing failed: " + str(e))
-
-`;
-            
-            document.querySelectorAll('.inbound-mapping-input').forEach(input => {
-                const path = input.dataset.inboundTarget;
-                const rule = inboundRules[path];
-                if (!rule && input.value.trim() === '') return;
-
-                if (rule && rule.branches.length > 0) {
-                    const varName = `val_${path.split('.').pop().replace(/[^a-zA-Z0-9_]/g, '_')}`;
-                    rule.branches.forEach((b, idx) => {
-                        const kw = idx === 0 ? 'if' : 'elif';
-                        pyCode += `${kw} ${buildPythonCondition(b, 'inbound')}:
-`;
-                        pyCode += `    ${varName} = ${formatPythonValueExpr(b.resultVal, 'inbound')}
-`;
-                    });
-                    pyCode += `else:
-    ${varName} = ${formatPythonValueExpr(rule.elseVal, 'inbound')}
-`;
-                    pyCode += `set_node_value(root, "${path}", ${varName})
-
-`;
-                } else {
-                    const tokens = parseExpression(input.value.trim(), apiProperties);
-                    let pyVal = "";
-                    if (tokens.length === 1) {
-                        if (tokens[0].type === 'literal') pyVal = `"${tokens[0].val.replace(/"/g, '\\"')}"`;
-                        else pyVal = `str(data.get("${tokens[0].val}", ""))`;
-                    } else {
-                        pyVal = `f"`;
-                        tokens.forEach(t => {
-                            if (t.type === 'literal') pyVal += t.val.replace(/"/g, '\\"');
-                            else pyVal += `{data.get("${t.val}", "")}`;
-                        });
-                        pyVal += `"`;
-                    }
-                    pyCode += `set_node_value(root, "${path}", ${pyVal})
-`;
-                }
-            });
-
-            pyCode += `
-# output_var passes the populated BOD to Infor OS
-`;
-            pyCode += `output_var = ET.tostring(root, encoding='unicode')
-`;
-            document.getElementById('inboundPythonInput').value = pyCode;
+            document.getElementById('inboundPythonInput').value = buildInboundIonPython();
         }
 
-        // --- CONDITIONAL RUNTIME EVALUATOR FOR SIMULATORS ---
-        function evalConditionBranch(lhsRaw, op, compareVal) {
-            const lhs = String(lhsRaw ?? '').trim();
-            const rhs = String(compareVal ?? '').trim();
-            switch (op) {
-                case '==': return lhs === rhs;
-                case '!=': return lhs !== rhs;
-                case 'contains': return lhs.includes(rhs);
-                case 'startsWith': return lhs.startsWith(rhs);
-                case '>': return (parseFloat(lhs) || 0) > (parseFloat(rhs) || 0);
-                case '<': return (parseFloat(lhs) || 0) < (parseFloat(rhs) || 0);
-                case 'isEmpty': return lhs === '';
-                case 'notEmpty': return lhs !== '';
-                default: return lhs === rhs;
-            }
-        }
-
-        function interpolateValue(exprStr, resolverFn, validSources) {
-            const trimmed = String(exprStr ?? '').trim();
-            if (trimmed === '') return '';
-            const tokens = parseExpression(trimmed, validSources);
-            if (tokens.length === 1 && tokens[0].type === 'literal') {
-                const lw = trimmed.toLowerCase();
-                if (lw === 'true') return true;
-                if (lw === 'false') return false;
-                return trimmed;
-            }
-            let out = '';
-            tokens.forEach(t => {
-                if (t.type === 'literal') out += t.val;
-                else out += resolverFn(t.val);
-            });
-            return out;
-        }
-
-        // --- SIMULATORS ---
+        // --- XSLT SIMULATOR ---
         function simulateXSLT() {
             if (!bodXmlDoc) { alert("Please upload OAGIS XML first."); return; }
             try {
@@ -3662,255 +4763,58 @@ import xml.etree.ElementTree as ET
             } catch (e) { document.getElementById('xsltOutput').value = "Engine Error: \n" + e.message; }
         }
 
-        function extractNodeValue(path, syncNode, contextNode) {
-            const cleanPath = path.replace(/[{}]/g, '').trim();
-            if (!cleanPath) return "";
-            let parts = cleanPath.split('.');
-            let current = null;
-
-            const syncIdx = parts.indexOf('Sync');
-            if (syncIdx !== -1) {
-                current = syncNode;
-                parts = parts.slice(syncIdx + 1);
-            } else {
-                current = contextNode;
-                const ctxName = current ? getLocalName(current.nodeName) : '';
-                const ctxIdx = ctxName ? parts.indexOf(ctxName) : -1;
-                if (ctxIdx !== -1) {
-                    parts = parts.slice(ctxIdx + 1);
-                } else if (parts[0] === 'DataArea') {
-                    parts = parts.slice(2);
-                } else if (parts.length > 1 && bodXmlDoc && getLocalName(bodXmlDoc.documentElement.nodeName) === parts[0]) {
-                    // If a full BOD root path was passed and contextNode is a child (like PurchaseOrderLine), locate matching start
-                    const subStart = parts.findIndex((seg, idx) => idx > 0 && Array.from(current.childNodes || []).some(n => n.nodeType === 1 && getLocalName(n.nodeName) === seg));
-                    if (subStart !== -1) {
-                        parts = parts.slice(subStart);
-                    } else {
-                        parts = parts.slice(1);
-                    }
-                }
-            }
-
-            for (let p of parts) {
-                if (!current) break;
-                if (p.startsWith('@')) {
-                    current = typeof current.getAttribute === 'function' ? current.getAttribute(p.substring(1)) : "";
-                    break;
-                } else {
-                    let child = Array.from(current.childNodes || []).find(n => n.nodeType === 1 && getLocalName(n.nodeName) === p);
-                    if (child) current = child;
-                    else { current = null; break; }
-                }
-            }
-            return typeof current === 'string' ? current : (current ? (current.textContent || "") : "");
+        // --- SIMULATORS (BODtoJSON 2.6.0 in the browser) ---
+        function formatEngineError(e) {
+            const kind = e && e.name && e.name !== 'Error' ? e.name : 'Error';
+            return `${kind}: ${e && e.message ? e.message : e}`;
         }
 
-        function setNestedValue(obj, pathStr, value) {
-            const segments = String(pathStr || '').split('.').filter(Boolean);
-            if (segments.length === 0) return;
-            let cur = obj;
-            for (let i = 0; i < segments.length - 1; i++) {
-                const seg = segments[i];
-                if (!cur[seg] || typeof cur[seg] !== 'object' || Array.isArray(cur[seg])) {
-                    cur[seg] = {};
-                }
-                cur = cur[seg];
-            }
-            cur[segments[segments.length - 1]] = value;
-        }
-
-        function evaluateSingleInput(input, resolveBod, validPaths) {
-            const fullTarget = input.dataset.target;
-            const leafKey = fullTarget.split('.').pop();
-            const rule = outboundRules[fullTarget];
-            if (!rule && input.value.trim() === '') return undefined;
-
-            if (rule && rule.branches.length > 0) {
-                for (const b of rule.branches) {
-                    const lhs = resolveBod(b.field);
-                    if (evalConditionBranch(lhs, b.op, b.compareVal)) {
-                        return interpolateValue(b.resultVal, resolveBod, validPaths);
-                    }
-                }
-                return interpolateValue(rule.elseVal, resolveBod, validPaths);
-            }
-
-            const tokens = parseExpression(input.value.trim(), validPaths);
-            let strResult = "";
-            tokens.forEach(t => {
-                if (t.type === 'literal') strResult += t.val;
-                else if (t.type === 'path') strResult += resolveBod(t.val);
-            });
-
-            if (tokens.length === 1 && tokens[0].type === 'literal') {
-                let lw = String(strResult).toLowerCase();
-                if (lw === 'true') return true;
-                if (lw === 'false') return false;
-            } else if (leafKey === 'isActive' || leafKey === 'usableInPurchase') {
-                if (String(strResult) === 'Open') return true;
-            }
-            return strResult;
-        }
-
-        function findMatchingChildElements(parentEl, repeatTag) {
-            const cleanTag = String(repeatTag || '').trim();
-            if (!cleanTag || !parentEl) return [parentEl];
-            const directMatches = Array.from(parentEl.childNodes || []).filter(
-                n => n.nodeType === 1 && getLocalName(n.nodeName) === cleanTag
-            );
-            if (directMatches.length > 0) return directMatches;
-            const descMatches = Array.from(parentEl.getElementsByTagName('*') || []).filter(
-                n => getLocalName(n.nodeName) === cleanTag
-            );
-            return descMatches.length > 0 ? descMatches : [];
-        }
-
-        function evaluateArrayBlock(arrTarget, repeatTag, syncNode, contextNode, validPaths) {
-            const repeatNodes = findMatchingChildElements(contextNode, repeatTag);
-            if (repeatNodes.length === 0) return [];
-
-            // Collect all .mapping-input elements belonging to this array scope (excluding deeper nested array scopes)
-            const scopePrefix = `${arrTarget}[].`;
-            const allInputs = Array.from(document.querySelectorAll('#mapperContainer .mapping-input'));
-            const directInputs = allInputs.filter(inp => {
-                const t = inp.dataset.target || '';
-                if (!t.startsWith(scopePrefix)) return false;
-                const rem = t.slice(scopePrefix.length);
-                return !rem.includes('[]');
-            });
-
-            // Collect immediate nested .array-repeat-input blocks inside this array scope
-            const allArrayInputs = Array.from(document.querySelectorAll('#mapperContainer .array-repeat-input'));
-            const nestedArrayInputs = allArrayInputs.filter(aInp => {
-                const aName = aInp.dataset.array || '';
-                if (!aName.startsWith(scopePrefix)) return false;
-                const rem = aName.slice(scopePrefix.length);
-                return !rem.includes('[]');
-            });
-
-            const resultList = [];
-            repeatNodes.forEach(repNode => {
-                const itemObj = {};
-                const resolveLocal = (p) => extractNodeValue(p, syncNode, repNode);
-
-                directInputs.forEach(inp => {
-                    const val = evaluateSingleInput(inp, resolveLocal, validPaths);
-                    if (val !== undefined) {
-                        const relPath = inp.dataset.target.slice(scopePrefix.length);
-                        setNestedValue(itemObj, relPath, val);
-                    }
-                });
-
-                nestedArrayInputs.forEach(subArrInp => {
-                    const subArrTarget = subArrInp.dataset.array;
-                    const subRelPath = subArrTarget.slice(scopePrefix.length);
-                    const subArrVal = evaluateArrayBlock(subArrTarget, subArrInp.value, syncNode, repNode, validPaths);
-                    setNestedValue(itemObj, subRelPath, subArrVal);
-                });
-
-                resultList.push(itemObj);
-            });
-
-            return resultList;
-        }
-
+        // Runs the RULES and options in the ION script exactly as bod_to_json would.
         function simulatePython() {
             if (!bodXmlDoc) { alert("Please upload OAGIS XML first."); return; }
-            
-            const dataArea = Array.from(bodXmlDoc.documentElement.childNodes).find(n => n.nodeType === 1 && getLocalName(n.nodeName) === 'DataArea');
-            if(!dataArea) { document.getElementById('pythonOutput').value = "Error: No DataArea found in BOD."; return; }
-            
-            const syncNode = Array.from(dataArea.childNodes).find(n => n.nodeType === 1 && getLocalName(n.nodeName) === 'Sync');
-            const nounNodes = Array.from(dataArea.childNodes).filter(n => n.nodeType === 1 && getLocalName(n.nodeName) !== 'Sync');
-            const validPaths = extractedPaths.map(p => p.path);
-
-            const topHeaderInputs = Array.from(document.querySelectorAll('#mapperContainer .mapping-input')).filter(
-                inp => !(inp.dataset.target || '').includes('[]')
-            );
-            const topArrayInputs = Array.from(document.querySelectorAll('#mapperContainer .array-repeat-input')).filter(
-                aInp => !(aInp.dataset.array || '').includes('[]')
-            );
-            
-            let items = [];
-            nounNodes.forEach(nounNode => {
-                let payload = {};
-                const resolveBod = (p) => extractNodeValue(p, syncNode, nounNode);
-
-                topHeaderInputs.forEach(input => {
-                    const val = evaluateSingleInput(input, resolveBod, validPaths);
-                    if (val !== undefined) {
-                        setNestedValue(payload, input.dataset.target, val);
-                    }
+            const out = document.getElementById('pythonOutput');
+            let spec;
+            try { spec = readIonScript(document.getElementById('pythonInput').value, 'bod_to_json'); }
+            catch (e) { out.value = 'Script error: ' + e.message; return; }
+            const kw = spec.kwargs;
+            try {
+                const data = BODtoJSONjs.bodToData(rawBodXmlString, spec.rules, kw.verb === undefined ? null : kw.verb, {
+                    single: kw.single === true,
+                    includeHeader: kw.include_header !== false,
+                    missing: kw.missing === undefined ? null : kw.missing,
+                    kind: kw.kind || 'auto',
+                    separator: kw.separator || '_'
                 });
-
-                topArrayInputs.forEach(arrInp => {
-                    const arrName = arrInp.dataset.array;
-                    const arrVal = evaluateArrayBlock(arrName, arrInp.value, syncNode, nounNode, validPaths);
-                    setNestedValue(payload, arrName, arrVal);
-                });
-
-                items.push(payload);
-            });
-            
-            const finalPayload = activeTargetSchema.type === 'array' ? items : (items.length > 0 ? items[0] : {});
-            document.getElementById('pythonOutput').value = JSON.stringify(finalPayload, null, 2);
+                out.value = BODtoJSONjs.pyJsonDumps(data, 2);
+            } catch (e) {
+                out.value = formatEngineError(e);
+            }
             saveMappingSnapshot(false);
         }
 
+        // Builds sample API JSON from the endpoint fields and runs json_to_bod with the script's RULES.
+        function buildInboundSampleJson() {
+            const mock = {};
+            apiProperties.forEach(p => mock[p] = `Mock_${p.toUpperCase()}`);
+            if ('companyId' in mock) mock.companyId = '3100';
+            return mock;
+        }
         function simulateInbound() {
             if (!bodXmlDoc) { alert("Please upload OAGIS XML first."); return; }
             if (apiProperties.length === 0) { alert("Please map an API endpoint first."); return; }
-
-            let mockData = {};
-            apiProperties.forEach(p => mockData[p] = `Mock_${p.toUpperCase()}`);
-            mockData['companyId'] = '3100'; 
-            const resolveApi = (p) => mockData[p.replace(/[{}]/g, '').trim()] ?? '';
-            
-            const parser = new DOMParser();
-            let simulatedDoc = parser.parseFromString(rawBodXmlString, "text/xml");
-
-            document.querySelectorAll('.inbound-mapping-input').forEach(input => {
-                const path = input.dataset.inboundTarget;
-                const rule = inboundRules[path];
-                if (!rule && input.value.trim() === '') return;
-
-                let strResult = "";
-                if (rule && rule.branches.length > 0) {
-                    let matched = false;
-                    for (const b of rule.branches) {
-                        const lhs = resolveApi(b.field);
-                        if (evalConditionBranch(lhs, b.op, b.compareVal)) {
-                            strResult = String(interpolateValue(b.resultVal, resolveApi, apiProperties));
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if (!matched) {
-                        strResult = String(interpolateValue(rule.elseVal, resolveApi, apiProperties));
-                    }
-                } else {
-                    const tokens = parseExpression(input.value.trim(), apiProperties);
-                    tokens.forEach(t => {
-                        if (t.type === 'literal') strResult += t.val;
-                        else if (t.type === 'path') strResult += mockData[t.val] || "";
-                    });
-                }
-
-                const parts = path.split('.');
-                let current = simulatedDoc.documentElement;
-                if(getLocalName(current.nodeName) === parts[0]) parts.shift();
-
-                for (let i=0; i<parts.length; i++) {
-                    let p = parts[i];
-                    if (p.startsWith('@')) { current.setAttribute(p.substring(1), strResult); return; }
-                    let child = Array.from(current.childNodes).find(n => n.nodeType === 1 && getLocalName(n.nodeName) === p);
-                    if (child) current = child; else { current = null; break; }
-                }
-                if (current) current.textContent = strResult;
-            });
-
-            const serializer = new XMLSerializer();
-            document.getElementById('inboundPythonOutput').value = serializer.serializeToString(simulatedDoc);
+            const out = document.getElementById('inboundPythonOutput');
+            let spec;
+            try { spec = readIonScript(document.getElementById('inboundPythonInput').value, 'json_to_bod'); }
+            catch (e) { out.value = 'Script error: ' + e.message; return; }
+            const kw = spec.kwargs;
+            const opt = {};
+            const names = { rules: 'rules', root: 'root', release_id: 'releaseId', version_id: 'versionId', action_code: 'actionCode', namespace: 'namespace', pretty: 'pretty', xml_declaration: 'xmlDeclaration', include_application_area: 'includeApplicationArea', separator: 'separator', flat: 'flat' };
+            Object.keys(kw).forEach(k => { if (names[k]) opt[names[k]] = kw[k]; });
+            try {
+                out.value = BODtoJSONjs.jsonToBod(buildInboundSampleJson(), kw.verb || 'Sync', kw.noun || null, opt);
+            } catch (e) {
+                out.value = formatEngineError(e);
+            }
         }
 
         // --- EXPORT INTEGRATION STACK ---
@@ -3927,11 +4831,13 @@ import xml.etree.ElementTree as ET
             jsonFolder.file(`${objectName}.schema.json`, JSON.stringify(activeTargetSchema, null, 2));
             jsonFolder.file(`${objectName}.properties.json`, JSON.stringify(propertiesJson, null, 2));
             zip.file(`${objectName}_outbound.py`, document.getElementById('pythonInput').value);
+            try { zip.file(`${objectName}_outbound.rules.json`, JSON.stringify(readIonScript(document.getElementById('pythonInput').value, 'bod_to_json').rules, null, 2)); } catch (e) { /* script edited by hand */ }
             if (document.getElementById('b2bXslt') && document.getElementById('b2bXslt').value.trim()) {
                 zip.file(`${objectName}_bod2bod.xslt`, document.getElementById('b2bXslt').value);
             }
             if(document.getElementById('inboundPythonInput').value.trim()) {
                 zip.file(`${objectName}_inbound.py`, document.getElementById('inboundPythonInput').value);
+                try { zip.file(`${objectName}_inbound.rules.json`, JSON.stringify(readIonScript(document.getElementById('inboundPythonInput').value, 'json_to_bod').rules, null, 2)); } catch (e) { /* script edited by hand */ }
             }
 
             zip.generateAsync({ type: "blob" }).then(content => {
