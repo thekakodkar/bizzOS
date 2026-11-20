@@ -1,4 +1,4 @@
-# Bizzteq Enterprise Integration OS
+# BizzStudio Enterprise Integration OS
 
 Single-file studio for Infor OS / ION mapping.
 
