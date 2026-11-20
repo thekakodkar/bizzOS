@@ -1014,7 +1014,7 @@
                             4. OS Registry Package Name
                         </span>
                     </label>
-                    <input type="text" id="objectName" placeholder="e.g., ChartofAccountsMed" onkeyup="updateGenerators(); updateSidebarRailStatus();">
+                    <input type="text" id="objectName" placeholder="e.g., ChartofAccountsMed" onkeyup="updateGenerators(); updateInboundGenerators(); updateSidebarRailStatus();">
                 </div>
                 
                 <div class="btn-group">
@@ -3146,6 +3146,8 @@ ${indent.slice(4)}`;
         }
 
         /*BODTOJSON_JS_START*/
+        // Powered by BODtoJSON by Niraj Kakodkar (Bizzteq) – https://thekakodkar.github.io/BODtoJSON/
+        // (MIT License with attribution requirement; keep this credit).
         // In-browser port of BODtoJSON 2.6.0 (PyPI) used for the previews:
         // to_records (flattening), Mapper / bod_to_data / bod_to_json (output
         // templates), TransformRules (2.5 flat rules) and json_to_bod.
@@ -4599,16 +4601,28 @@ ${indent.slice(4)}`;
             });
             return obj;
         }
+        // Header comment of every generated ION script. It is the credit the
+        // BODtoJSON license asks generated scripts to keep.
+        const BODTOJSON_SITE = 'https://thekakodkar.github.io/BODtoJSON/';
+        function ionTargetLabel() {
+            const el = document.getElementById('objectName');
+            const name = String((el && el.value) || '').trim().replace(/\s+/g, ' ');
+            if (!name) return 'JSON';
+            return /json$/i.test(name) ? name : `${name} JSON`;
+        }
+        function ionScriptHeader(direction) {
+            return `# Infor ION Scripting: ${direction} with BODtoJSON ${BODTOJSON_VERSION}
+# (pip install BODtoJSON==${BODTOJSON_VERSION}). ${BODTOJSON_SITE}`;
+        }
         function buildSimpleIonPython() {
             const rules = buildOutboundTemplate('', []);
             const single = !(activeTargetSchema && activeTargetSchema.type === 'array');
             const args = ['input_var', 'rules=RULES'];
             if (single) args.push('single=True');
             if (ionMissingMode === 'empty') args.push('missing=""');
-            const objName = (document.getElementById('objectName') && document.getElementById('objectName').value) || 'payload';
-            return `# Infor ION Scripting: BOD -> ${objName} JSON with BODtoJSON ${BODTOJSON_VERSION}
-# (pip install BODtoJSON==${BODTOJSON_VERSION}). ION supplies input_var (the BOD XML)
-# and reads output_var. RULES is the output template: your JSON with BOD paths.
+            return `${ionScriptHeader(`BOD -> ${ionTargetLabel()}`)}
+# ION supplies input_var (the BOD XML) and reads output_var.
+# RULES is the output template: your JSON with BOD paths.
 from BODtoJSON import bod_to_json
 
 RULES = ${toPythonLiteral(rules)}
@@ -4677,9 +4691,9 @@ output_var = bod_to_json(${args.join(', ')})  # noqa: F821 - input_var is provid
             if (env.versionId !== null) args.push(`version_id=${JSON.stringify(env.versionId)}`);
             args.push('rules=RULES');
             const note = Object.keys(rules).length ? '' : '\n# Nothing is mapped yet: map at least one BOD field on the Field Mapping tab.';
-            return `# Infor ION Scripting: API JSON -> OAGIS BOD with BODtoJSON ${BODTOJSON_VERSION}
-# (pip install BODtoJSON==${BODTOJSON_VERSION}). ION supplies input_var (the JSON payload)
-# and reads output_var. RULES maps BOD paths (targets) to JSON fields ("$field").${note}
+            return `${ionScriptHeader(`${ionTargetLabel()} -> BOD`)}
+# ION supplies input_var (the JSON payload) and reads output_var.
+# RULES maps BOD paths (targets) to JSON fields ("$field").${note}
 from BODtoJSON import json_to_bod
 
 RULES = ${toPythonLiteral(rules)}

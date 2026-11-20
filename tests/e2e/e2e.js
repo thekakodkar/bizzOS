@@ -22,6 +22,7 @@ const FIX = path.join(__dirname, '..', 'parity', 'fixtures');
   const result = await page.evaluate((R) => {
     const set = (t, v) => { const el = document.querySelector(`#mapperContainer .mapping-input[data-target="${t}"]`); if (!el) throw new Error('no input ' + t); el.value = v; };
     const arr = (a, v) => { document.querySelector(`#mapperContainer .array-repeat-input[data-array="${a}"]`).value = v; };
+    document.getElementById('objectName').value = 'CoAMed';
     set('externalSystemId', `{${R}Sync.AccountingEntityID}_{${R}PurchaseOrder.PurchaseOrderHeader.DisplayID}`);
     set('isActive', 'true');
     set('companyId', `company[{${R}Sync.AccountingEntityID}]`);

@@ -11,6 +11,16 @@ The ION Python code the studio generates targets
 The scripts have no helper code of their own: the mapping is a `RULES` dictionary and
 the rest is one library call.
 
+Every generated script starts with this header comment. The second line links to
+the BODtoJSON site. The first line names the target, which is the
+**OS Registry Package Name** you entered, or `JSON` when it is empty. Inbound
+scripts read `<name> JSON -> BOD`.
+
+```python
+# Infor ION Scripting: BOD -> CoAMed JSON with BODtoJSON 2.6.0
+# (pip install BODtoJSON==2.6.0). https://thekakodkar.github.io/BODtoJSON/
+```
+
 ### Outbound: BOD to API JSON (Agentic Engine tab)
 
 The outbound mapper is written out as a BODtoJSON 2.6.0 output template. You write
@@ -114,3 +124,16 @@ npm install --no-save @xmldom/xmldom@0.9.12 playwright-core@1.65.1
 python tests/parity/gen_cases.py 5000 7 /tmp/cases.json && node tests/parity/run_parity.js index.html /tmp/cases.json
 CHROME_PATH=/usr/bin/google-chrome node tests/e2e/e2e.js index.html /tmp/e2e.json && python tests/e2e/verify.py /tmp/e2e.json
 ```
+
+## License & attribution
+
+The studio's previews run a JavaScript port of BODtoJSON, and the scripts the
+studio generates use the BODtoJSON package. BODtoJSON is under the
+[MIT License with an attribution requirement](https://github.com/thekakodkar/BODtoJSON/blob/master/LICENSE):
+any use, copy, or derivative, including generated ION scripts, must keep the
+credit
+
+> Powered by BODtoJSON by Niraj Kakodkar (Bizzteq) – https://thekakodkar.github.io/BODtoJSON/
+
+In a generated script, the header comment above counts as the credit, so keep it
+when you copy or edit the script. See [NOTICE](NOTICE).

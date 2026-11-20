@@ -27,6 +27,12 @@ try:
     run(bad, xml); msg = None
 except Exception as e:  # noqa: BLE001
     msg = f"{type(e).__name__}: {e}"
+HEAD2 = "# (pip install BODtoJSON==2.6.0). https://thekakodkar.github.io/BODtoJSON/"
+def header_ok(script, direction):
+    lines = script.splitlines()
+    return lines[:2] == [f"# Infor ION Scripting: {direction} with BODtoJSON 2.6.0", HEAD2]
+checks.append(('outbound header comment', header_ok(r['script'], 'BOD -> CoAMed JSON') and header_ok(r['scriptEmpty'], 'BOD -> CoAMed JSON')))
+checks.append(('inbound header comment', header_ok(r['inScript'], 'CoAMed JSON -> BOD')))
 checks.append(('error message with location', msg == r['badPreview']))
 print('python error:', msg)
 print('BODtoJSON', BODtoJSON.__version__)

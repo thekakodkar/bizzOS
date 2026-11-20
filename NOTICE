@@ -1,0 +1,17 @@
+BizzStudio Enterprise Integration OS
+
+This app includes a JavaScript port of BODtoJSON (the BODTOJSON_JS block in
+index.html), and the Infor ION scripts it generates use the BODtoJSON package.
+
+    Powered by BODtoJSON by Niraj Kakodkar (Bizzteq) – https://thekakodkar.github.io/BODtoJSON/
+
+BODtoJSON is Copyright (c) 2020-2026 Niraj Kakodkar and licensed under the MIT
+License with an attribution requirement:
+https://github.com/thekakodkar/BODtoJSON/blob/master/LICENSE
+
+Any use, copy, or derivative of BODtoJSON, including the generated ION scripts,
+must keep the credit above. In a generated script, the header comment counts
+as the credit:
+
+    # Infor ION Scripting: BOD -> CoAMed JSON with BODtoJSON 2.6.0
+    # (pip install BODtoJSON==2.6.0). https://thekakodkar.github.io/BODtoJSON/
