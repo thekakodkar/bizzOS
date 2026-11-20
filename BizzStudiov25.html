@@ -914,7 +914,38 @@
         .b2b-path small { display: block; color: var(--text-muted); font-size: 0.62rem; margin-top: 0.15rem; }
         .b2b-map-input, .b2b-mini { width: 100%; background: rgba(15,23,42,0.7); color: var(--text-main); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 0.45rem 0.55rem; font-family: var(--font-mono); font-size: 0.74rem; }
         .b2b-mini { width: 150px; }
-        .b2b-code { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; min-height: 200px; margin-top: 0.7rem; }
+        #tab-b2b.tab-content.active {
+            display: flex;
+            flex-direction: column;
+            min-height: calc(100vh - 8rem);
+            height: auto;
+            gap: 0.75rem;
+        }
+        #tab-b2b .mapper-header { flex-direction: column; align-items: stretch; }
+        #tab-b2b .b2b-toolbar {
+            display: grid;
+            grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
+            gap: 0.75rem;
+            align-items: end;
+        }
+        #tab-b2b .b2b-files { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+        #tab-b2b .b2b-files input[type="file"] { width: 100%; }
+        #b2bSplit {
+            display: grid;
+            grid-template-columns: minmax(300px, 38%) minmax(0, 1fr);
+            gap: 0.85rem;
+            flex: 1 1 auto;
+            min-height: 520px;
+            height: 520px;
+        }
+        #b2bSplit .bod-tree-panel { display: flex; min-height: 520px; }
+        #b2bSplit .map-grid { min-height: 520px; }
+        #tab-b2b .b2b-code { flex: 0 0 auto; min-height: 220px; }
+        @media (max-width: 980px) {
+            #tab-b2b .b2b-toolbar { grid-template-columns: 1fr; }
+            #b2bSplit { grid-template-columns: 1fr; height: auto; }
+            #b2bSplit .bod-tree-panel, #b2bSplit .map-grid { min-height: 360px; height: 360px; }
+        }
         .b2b-code textarea { min-height: 200px; }
         .b2b-write-toggle { font-size: 0.68rem; }
         @media (max-width: 1180px) {
@@ -1193,7 +1224,7 @@
             <div id="tab-b2b" class="tab-content">
                 <div class="mapper-header">
                     <span style="font-size: 0.75rem; color: var(--text-muted);">1. Load source and target BOD. 2. Click a target field. 3. Click a source node, or type to search source paths. XSLT updates as you map.</span>
-                    <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
+                    <div class="b2b-toolbar">
                         <label class="b2b-files">Source BOD
                             <input type="file" accept=".xml" onchange="b2bLoadFile('source', this)">
                             <span id="b2bSourceBadge" style="color:#6ee7b7;"></span>
@@ -1203,7 +1234,8 @@
                             <span id="b2bTargetBadge" style="color:#6ee7b7;"></span>
                         </label>
                         <button type="button" class="btn-compact" onclick="b2bAutoMatch()">Auto-match by name</button>
-                        <button type="button" class="btn-compact btn-compact-exec" onclick="downloadThisStudio()">Download this HTML</button>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
                         <label class="toggle-label"><input type="checkbox" id="b2bShowOptional" onchange="b2bFilterRows()"> Show Optional Fields</label>
                     </div>
                 </div>
@@ -4125,9 +4157,12 @@ import xml.etree.ElementTree as ET
 
         function b2bBindInput(input, full) {
             const box = input.parentElement;
-            const dropdown = document.createElement('div');
-            dropdown.className = 'dropdown-menu bod-dropdown';
-            box.appendChild(dropdown);
+            let dropdown = box.querySelector('.bod-dropdown');
+            if (!dropdown) {
+                dropdown = document.createElement('div');
+                dropdown.className = 'dropdown-menu bod-dropdown';
+                box.appendChild(dropdown);
+            }
             const track = () => { rememberCaret(input); bod2.focus = input; };
             input.addEventListener('focus', () => { track(); input.dispatchEvent(new Event('input')); });
             input.addEventListener('keyup', track);
@@ -4202,10 +4237,11 @@ import xml.etree.ElementTree as ET
                 });
                 Object.keys(groups).forEach(name => {
                     const nodes = groups[name];
-                    if (nodes.length > 1) {
+                    const looksRepeated = nodes.length > 1 || /Line$/.test(name) || name === 'Comment' || name === 'Note';
+                    if (looksRepeated && nodes[0] && Array.from(nodes[0].childNodes).some(n => n.nodeType === 1)) {
                         const item = walk(nodes[0]);
                         props[name] = { type: 'array', items: { properties: item.properties, required: item.required } };
-                        if (item.required.length) req.push(name);
+                        if (item.required.length || nodes.length > 1) req.push(name);
                     } else {
                         const ch = nodes[0];
                         const childEls = Array.from(ch.childNodes).filter(n => n.nodeType === 1);
@@ -4238,7 +4274,8 @@ import xml.etree.ElementTree as ET
                 if (details.type === 'array' && details.items && details.items.properties) {
                     const block = document.createElement('div');
                     block.className = isReq ? 'array-block' : 'array-block optional';
-                    block.innerHTML = '<div class="array-block-header"><div class="array-block-title"><div class="dot ' + (isReq ? 'req' : 'opt') + '"></div><span>' + escapeHtmlAttr(full) + '[]</span><span class="badge node" style="font-size:0.55rem;">ARRAY</span></div></div>';
+                    const tag = key;
+                    block.innerHTML = '<div class="array-block-header"><div class="array-block-title"><div class="dot ' + (isReq ? 'req' : 'opt') + '"></div><span>' + escapeHtmlAttr(full) + '[]</span><span class="badge node" style="font-size:0.55rem;">ARRAY</span></div><div class="array-repeat-bar"><span class="array-repeat-label">Repeating XML Node</span><input type="text" class="array-repeat-input b2b-repeat" data-array="' + escapeHtmlAttr(full) + '" value="' + escapeHtmlAttr(tag) + '" placeholder="e.g. PurchaseOrderLine"></div></div>';
                     const child = document.createElement('div');
                     child.className = 'map-grid';
                     b2bRenderFields(details.items.properties, details.items.required || [], child, full + '[]');
@@ -4258,7 +4295,7 @@ import xml.etree.ElementTree as ET
                     row.className = isReq ? 'map-row' : 'map-row optional';
                     const map = bod2.maps[bod2.dir];
                     const val = map[full] || '';
-                    row.innerHTML = '<div class="map-row-main"><div class="node-def"><span class="node-name"><div class="dot ' + (isReq ? 'req' : 'opt') + '"></div> ' + escapeHtmlAttr(full) + '</span><span class="node-type">' + escapeHtmlAttr(details.type || 'string') + (details.sample ? ' · ' + escapeHtmlAttr(details.sample.slice(0, 24)) : '') + '</span></div><div class="combo-box"><input type="text" class="mapping-input b2b-map-input" data-b2b-target="' + escapeHtmlAttr(full) + '" value="' + escapeHtmlAttr(val) + '" placeholder="Type to search source, or click the tree" autocomplete="off"></div></div>';
+                    row.innerHTML = '<div class="map-row-main"><div class="node-def"><span class="node-name"><div class="dot ' + (isReq ? 'req' : 'opt') + '"></div> ' + escapeHtmlAttr(full) + '</span><span class="node-type">' + escapeHtmlAttr(details.type || 'string') + (details.sample ? ' · ' + escapeHtmlAttr(details.sample.slice(0, 24)) : '') + '</span></div><div class="combo-box"><input type="text" class="mapping-input b2b-map-input" data-b2b-target="' + escapeHtmlAttr(full) + '" value="' + escapeHtmlAttr(val) + '" placeholder="Click the source tree, or type to search" autocomplete="off"><div class="dropdown-menu bod-dropdown"></div></div></div>';
                     const input = row.querySelector('input');
                     b2bBindInput(input, full);
                     container.appendChild(row);
