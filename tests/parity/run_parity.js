@@ -14,7 +14,10 @@ const path = require('path');
 const [, , htmlPath, casesPath, xmldomPath] = process.argv;
 global.DOMParser = require(xmldomPath || '@xmldom/xmldom').DOMParser;
 
-const ENGINE_RE = /\/\*BODTOJSON_JS_START\*\/([\s\S]*?)\/\*BODTOJSON_JS_END\*\/;
+// Avoid regex-literal escaping issues in this file; markers are fixed strings.
+const ENGINE_RE = new RegExp(
+  '/\\*BODTOJSON_JS_START\\*/([\\s\\S]*?)/\\*BODTOJSON_JS_END\\*/'
+);
 
 function extractEngine(text, label) {
   const m = text.match(ENGINE_RE);
