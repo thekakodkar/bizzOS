@@ -3,6 +3,9 @@
 // and inbound ION scripts and run the in-app previews. verify.py then runs the
 // same scripts with BODtoJSON 2.6.0 and compares.
 // Usage: node tests/e2e/e2e.js index.html tests/e2e/out.json
+//
+// Supports a full single-file studio or a bootstrap loader that fetches the
+// real studio from CDN / chunk parts (waits for the app shell to appear).
 const { chromium } = require('playwright-core');
 const fs = require('fs');
 const path = require('path');
@@ -14,6 +17,16 @@ const FIX = path.join(__dirname, '..', 'parity', 'fixtures');
   page.on('pageerror', e => errors.push(String(e)));
   page.on('dialog', d => { errors.push('dialog: ' + d.message()); d.dismiss(); });
   await page.goto('file://' + path.resolve(process.argv[2]));
+
+  // Bootstrap loaders replace the document; wait until the real studio is ready.
+  await page.waitForFunction(() => {
+    return !!(
+      document.getElementById('mapperContainer') ||
+      document.getElementById('bodFile') ||
+      document.querySelector('#tab-outbound, .mapper-split-container, #mainWorkspace')
+    );
+  }, { timeout: 90000 });
+
   await page.setInputFiles('#bodFile', path.join(FIX, 'sync_PO_lines.xml'));
   await page.waitForFunction(() => typeof bodXmlDoc !== 'undefined' && bodXmlDoc);
   await page.setInputFiles('#swaggerFile', path.join(__dirname, 'openapi_purchase_orders.json'));
@@ -80,4 +93,7 @@ const FIX = path.join(__dirname, '..', 'parity', 'fixtures');
   await browser.close();
   console.log('page errors:', errors.length ? errors : 'none');
   if (errors.length) process.exit(1);
-})();
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
