@@ -4,28 +4,57 @@
 // same scripts with BODtoJSON 2.6.0 and compares.
 // Usage: node tests/e2e/e2e.js index.html tests/e2e/out.json
 //
-// Supports a full single-file studio or a bootstrap loader that fetches the
-// real studio from CDN / chunk parts (waits for the app shell to appear).
+// If index.html is a bootstrap loader (CDN / chunk parts), resolve the real
+// studio to a temp file first so Playwright is not blocked by file:// fetch CORS.
 const { chromium } = require('playwright-core');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const FIX = path.join(__dirname, '..', 'parity', 'fixtures');
+
+async function resolveStudioHtml(htmlPath) {
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  if (html.includes('id="mapperContainer"') || html.includes("id='mapperContainer'") || html.includes('id="bodFile"')) {
+    return path.resolve(htmlPath);
+  }
+  const cdnMatch = html.match(/https?:\/\/cdn\.jsdelivr\.net\/gh\/[^\s'"`]+/);
+  if (cdnMatch) {
+    const url = cdnMatch[0].replace(/['"]+$/, '');
+    console.log('e2e: fetching studio from', url);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('CDN fetch failed HTTP ' + r.status);
+    const full = await r.text();
+    const tmp = path.join(os.tmpdir(), 'bizzOS-studio-e2e.html');
+    fs.writeFileSync(tmp, full);
+    return tmp;
+  }
+  const partNames = [...html.matchAll(/['"](part\d+\.txt)['"]/g)].map(m => m[1]);
+  if (partNames.length) {
+    const dir = path.dirname(path.resolve(htmlPath));
+    const full = partNames.map(p => fs.readFileSync(path.join(dir, p), 'utf8')).join('');
+    const tmp = path.join(os.tmpdir(), 'bizzOS-studio-e2e.html');
+    fs.writeFileSync(tmp, full);
+    return tmp;
+  }
+  return path.resolve(htmlPath);
+}
+
 (async () => {
+  const studioPath = await resolveStudioHtml(process.argv[2]);
   const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   page.on('dialog', d => { errors.push('dialog: ' + d.message()); d.dismiss(); });
-  await page.goto('file://' + path.resolve(process.argv[2]));
+  await page.goto('file://' + studioPath);
 
-  // Bootstrap loaders replace the document; wait until the real studio is ready.
   await page.waitForFunction(() => {
     return !!(
       document.getElementById('mapperContainer') ||
       document.getElementById('bodFile') ||
       document.querySelector('#tab-outbound, .mapper-split-container, #mainWorkspace')
     );
-  }, { timeout: 90000 });
+  }, { timeout: 60000 });
 
   await page.setInputFiles('#bodFile', path.join(FIX, 'sync_PO_lines.xml'));
   await page.waitForFunction(() => typeof bodXmlDoc !== 'undefined' && bodXmlDoc);
@@ -64,11 +93,9 @@ const FIX = path.join(__dirname, '..', 'parity', 'fixtures');
     const script = document.getElementById('pythonInput').value;
     simulatePython();
     const preview = document.getElementById('pythonOutput').value;
-    // missing="" toggle
     document.getElementById('ionMissingMode').value = 'empty'; setIonMissingMode('empty');
     const scriptEmpty = document.getElementById('pythonInput').value;
     const previewEmpty = document.getElementById('pythonOutput').value;
-    // Inbound
     const inSet = (path, v) => { const els = document.querySelectorAll(`.inbound-mapping-input[data-inbound-target="${path}"]`); if (!els.length) throw new Error('no inbound ' + path); els[0].value = v; };
     inSet(`SyncPurchaseOrder.DataArea.PurchaseOrder.PurchaseOrderHeader.DisplayID`, '{orderIdentifier}');
     inSet(`SyncPurchaseOrder.DataArea.PurchaseOrder.PurchaseOrderHeader.ExtendedAmount`, '{amount}');
@@ -82,7 +109,6 @@ const FIX = path.join(__dirname, '..', 'parity', 'fixtures');
     simulateInbound();
     const inPreview = document.getElementById('inboundPythonOutput').value;
     const sample = buildInboundSampleJson();
-    // user's own RULES pasted into the script textarea
     return { script, preview, scriptEmpty, previewEmpty, inScript, inPreview, sample };
   }, R);
   const userScript = fs.readFileSync(path.join(FIX, 'ion_script.py'), 'utf8');
