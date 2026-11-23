@@ -1,1 +1,17 @@
-PLACEHOLDER
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading Bizzteq OS…</title>
+<style>body{background:#030305;color:#94a3b8;font-family:system-ui;display:grid;place-items:center;min-height:100vh;margin:0}</style>
+</head><body><p id="s">Loading studio…</p>
+<script>
+(async () => {
+  const parts = ['part00.txt', 'part01.txt', 'part02.txt', 'part03.txt', 'part04.txt', 'part05.txt'];
+  const chunks = [];
+  for (const p of parts) {
+    const r = await fetch('./' + p);
+    if (!r.ok) { document.getElementById('s').textContent = 'Failed to load ' + p; return; }
+    chunks.push(await r.text());
+  }
+  document.open();
+  document.write(chunks.join(''));
+  document.close();
+})();
+</script></body></html>
