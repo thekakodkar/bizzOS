@@ -6,61 +6,55 @@
   <title>Bizzteq OS</title>
   <style>
     body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030305;color:#94a3b8;font-family:system-ui,sans-serif}
-    #s{text-align:center;line-height:1.6;max-width:28rem;padding:1.5rem}
+    #s{text-align:center;line-height:1.6;max-width:32rem;padding:1.5rem}
     code{font-size:.8em;opacity:.85;word-break:break-all}
+    a{color:#38bdf8}
+    .spin{display:inline-block;width:1.1rem;height:1.1rem;border:2px solid #334155;border-top-color:#38bdf8;border-radius:50%;animation:s .7s linear infinite;vertical-align:middle;margin-right:.5rem}
+    @keyframes s{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
-  <p id="s">Loading studio…</p>
+  <p id="s"><span class="spin"></span>Loading studio…</p>
   <script>
   (async () => {
     const el = document.getElementById('s');
     const set = (t) => { el.innerHTML = t; };
-
-    // Prefer same-origin chunks; fall back to GitHub/CDN mirrors of the last full studio.
+    const COMMIT = '441ae70b2333cd64e1c427da3c50f246e7bae72b';
+    // jsDelivr first (reliable CORS); local parts optional; then other mirrors
     const sources = [
-      { name: 'local parts', async load() {
-        const names = ['part00.txt','part01.txt','part02.txt','part03.txt','part04.txt','part05.txt'];
-        const chunks = [];
-        for (const p of names) {
-          set('Loading studio…<br><code>' + p + '</code>');
-          const r = await fetch('./' + p + '?t=' + Date.now());
-          if (!r.ok) throw new Error(p + ' HTTP ' + r.status);
-          chunks.push(await r.text());
-        }
-        return chunks.join('');
-      }},
-      { name: 'raw.githubusercontent', async load() {
-        const url = 'https://raw.githubusercontent.com/thekakodkar/bizzOS/441ae70b2333cd64e1c427da3c50f246e7bae72b/index.html';
-        set('Loading studio…<br><code>raw.githubusercontent</code>');
-        const r = await fetch(url + '?t=' + Date.now());
+      { name: 'jsDelivr', async load() {
+        const r = await fetch('https://cdn.jsdelivr.net/gh/thekakodkar/bizzOS@' + COMMIT + '/index.html', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return await r.text();
       }},
-      { name: 'jsDelivr', async load() {
-        const url = 'https://cdn.jsdelivr.net/gh/thekakodkar/bizzOS@441ae70b2333cd64e1c427da3c50f246e7bae72b/index.html';
-        set('Loading studio…<br><code>jsDelivr</code>');
-        const r = await fetch(url + '?t=' + Date.now());
+      { name: 'raw.githubusercontent', async load() {
+        const r = await fetch('https://raw.githubusercontent.com/thekakodkar/bizzOS/' + COMMIT + '/index.html', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return await r.text();
       }},
       { name: 'GitHack', async load() {
-        const url = 'https://raw.githack.com/thekakodkar/bizzOS/441ae70b2333cd64e1c427da3c50f246e7bae72b/index.html';
-        set('Loading studio…<br><code>githack</code>');
-        const r = await fetch(url + '?t=' + Date.now());
+        const r = await fetch('https://raw.githack.com/thekakodkar/bizzOS/' + COMMIT + '/index.html', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return await r.text();
+      }},
+      { name: 'local parts', async load() {
+        const names = ['part00.txt','part01.txt','part02.txt','part03.txt','part04.txt','part05.txt'];
+        const chunks = [];
+        for (const p of names) {
+          const r = await fetch('./' + p, { cache: 'no-store' });
+          if (!r.ok) throw new Error(p + ' HTTP ' + r.status);
+          chunks.push(await r.text());
+        }
+        return chunks.join('');
       }}
     ];
-
     const errors = [];
     for (const src of sources) {
       try {
+        set('<span class="spin"></span>Loading studio…<br><code>' + src.name + '</code>');
         const html = await src.load();
-        if (!html || html.length < 5000) throw new Error('response too small');
-        if (!html.includes('mapperContainer') && !html.includes('BODTOJSON')) {
-          throw new Error('not a studio HTML');
-        }
+        if (!html || html.length < 5000) throw new Error('response too small (' + (html && html.length) + ')');
+        if (!html.includes('mapperContainer') && !html.includes('BODTOJSON')) throw new Error('not a studio HTML');
         document.open();
         document.write(html);
         document.close();
@@ -70,7 +64,7 @@
         console.warn('studio source failed', src.name, e);
       }
     }
-    set('Could not load studio.<br><br><code>' + errors.join('<br>') + '</code><br><br>Hard-refresh (Ctrl/Cmd+Shift+R) or check the network tab.');
+    set('Could not load studio.<br><br><code>' + errors.join('<br>') + '</code><br><br>Hard-refresh (Ctrl/Cmd+Shift+R) or open the <a href="https://cdn.jsdelivr.net/gh/thekakodkar/bizzOS@' + COMMIT + '/index.html">CDN studio</a> directly.');
   })();
   </script>
 </body>
